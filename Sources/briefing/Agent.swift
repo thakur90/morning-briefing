@@ -14,7 +14,7 @@ struct Agent: AsyncParsableCommand {
     @MainActor
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)  // launchd redirects stdout to a file; flush per line
-        print("[\(Date.now.formatted(.iso8601))] agent started: \(Bundle.main.bundlePath)")
+        print("[\(Date.now.formatted(.iso8601))] agent started: \(Bundle.main.bundlePath) v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
 
         let report = await PermissionCheck.run()
         ReportPrinter.print(report)

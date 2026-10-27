@@ -277,7 +277,7 @@ pet-projects/
 
 ## 14. Milestones
 
-1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). **Remaining:** self-signed certificate, and confirming permissions survive a rebuild (A.6).
+1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). ✅ Signed with the self-signed "Briefing Code Signing" certificate, permissions **survive a rebuild** (new CDHash, no new prompts). **Done.**
 2. **Read path:** EventKitProvider, Reminders, Location (+ IP fallback), Weather, DayContext, CLI → agent requests, `briefing today --dry-run`.
 3. **Summarizer & output:** ClaudeClient, structured output, plain-summary fallback, HTML page (matching the mockup) + Markdown, notification that opens the page.
 4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up), `briefing install / uninstall / status`.
@@ -437,7 +437,9 @@ macOS remembers permissions **per code signature** (its "designated requirement"
 
 - An **ad-hoc** signature (`codesign -s -`) changes with every build, so **macOS would ask for permissions again after each rebuild**.
 - **Plan:** sign `Briefing.app` with a **self-signed code-signing certificate**, made once in Keychain Access (Certificate Assistant → Create a Certificate → type "Code Signing"). Its designated requirement stays the same across rebuilds.
-- Milestone 1 checks this: grant once → rebuild → reinstall → still granted.
+- **Verified in milestone 1:** grant once → change code → rebuild → reinstall → still granted. The designated requirement is `identifier "com.thakur90.briefing" and certificate leaf = H"b9a4…"`.
+- `scripts/build-app.sh` uses this certificate automatically if it's in the keychain. The first signing shows a keychain prompt; answering **Always Allow** stops it from coming back.
+- The certificate shows as "not trusted" in `security find-identity`. That's expected for a self-signed root and doesn't affect signing or permissions.
 
 ### A.7 Environment details
 

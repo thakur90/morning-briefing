@@ -3,7 +3,9 @@
 #   swift build → assemble bundle → codesign → optionally install to ~/Applications.
 #
 # Usage: scripts/build-app.sh [--debug] [--install]
-# Env:   SIGN_IDENTITY  code-signing identity (default "-" = ad-hoc; see design doc A.6)
+# Env:   SIGN_IDENTITY  code-signing identity. Defaults to the self-signed
+#        "Briefing Code Signing" certificate if it's in the keychain (keeps macOS
+#        permissions across rebuilds, design doc A.6), otherwise ad-hoc ("-").
 set -euo pipefail
 
 cd "${0:A:h}/.."
@@ -16,7 +18,12 @@ for arg in "$@"; do
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+default_identity="Briefing Code Signing"
+if [[ -z ${SIGN_IDENTITY:-} ]] && security find-identity -p codesigning | grep -q "\"$default_identity\""; then
+  SIGN_IDENTITY=$default_identity
+fi
 identity=${SIGN_IDENTITY:--}
+[[ $identity == - ]] && echo "warning: ad-hoc signing; macOS will ask for permissions again after each rebuild" >&2
 bundle_id=com.thakur90.briefing
 
 swift build -c $config --product briefing
