@@ -5,11 +5,24 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.thakur90.briefing</string>
 	<key>CFBundleName</key>
+	<string>Briefing</string>
+	<key>CFBundleDisplayName</key>
+	<string>Briefing</string>
+	<key>CFBundleExecutable</key>
 	<string>briefing</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!-- Background agent: no Dock icon, no menu bar, no windows (design doc §1). -->
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Briefing reads today's events for your morning summary. It never changes your calendars.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>

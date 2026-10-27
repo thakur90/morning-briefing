@@ -197,7 +197,7 @@ All permissions are granted to **`Briefing.app`** (bundle ID `com.thakur90.brief
 | Location | `NSLocationWhenInUseUsageDescription`, `NSLocationUsageDescription` | Weather |
 | Notifications | (none needed) | Briefing and change alerts |
 
-**Milestone 1 findings:** a bare CLI binary with an embedded Info.plist **gets Calendars and Reminders**, but **never gets a Location prompt**, whether run from Terminal or launchd. That's why the tool is an app bundle with a long-running agent. Milestone 1 finishes by checking that `Briefing.app`, started by launchd, gets all four permissions.
+**Milestone 1 findings:** a bare CLI binary with an embedded Info.plist **gets Calendars and Reminders**, but **never gets a Location prompt**, whether run from Terminal or launchd. `Briefing.app` (an `LSUIElement` bundle) started by launchd **gets all four permissions**. That confirms the app bundle + background agent design.
 
 ## 9. Security & privacy
 
@@ -277,7 +277,7 @@ pet-projects/
 
 ## 14. Milestones
 
-1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. **Remaining:** `scripts/build-app.sh` builds an invisible `Briefing.app`; launchd starts it; it gets Calendars, Reminders, Location and Notifications.
+1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). **Remaining:** self-signed certificate, and confirming permissions survive a rebuild (A.6).
 2. **Read path:** EventKitProvider, Reminders, Location (+ IP fallback), Weather, DayContext, CLI → agent requests, `briefing today --dry-run`.
 3. **Summarizer & output:** ClaudeClient, structured output, plain-summary fallback, HTML page (matching the mockup) + Markdown, notification that opens the page.
 4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up), `briefing install / uninstall / status`.
