@@ -1,74 +1,99 @@
 # Morning Briefing — Design Doc
 
-**Status:** Draft v3 · **Author:** thakur90 · **Date:** 2026-10-22
+**Status:** Draft v6 · **Author:** thakur90 · **Date:** 2026-10-27
 
 ## 1. Goal
 
-A **native macOS app, written in Swift**. Every weekday morning it shows a short summary of my day:
+A Mac tool, written in Swift, that **runs invisibly in the background**. It has no window, no Dock icon and no menu-bar icon. Every weekday at 7:00 it sends me a **notification** with a short summary of my day. Clicking it opens the full briefing.
 
+The briefing covers:
 - **Weather** for today, at my current location
 - **How the day looks**: events from **Apple (iCloud) and Google calendars**, built so that more calendars (e.g. **Outlook**) can be added later
 - **Reminders** that are due today or overdue (Apple Reminders)
 
-It also lets me **add new events**. They go into my **Apple (iCloud) calendar** by default.
+**It stays up to date during the day.** When an event is added, moved or cancelled (from the Mac, iPhone or the web), the briefing refreshes automatically and a notification says what changed.
 
-**Interfaces, in order:**
-1. **v1, terminal:** a `briefing` command (`briefing today`, `briefing add "…"`)
-2. **v2, menu-bar Mac app:** the briefing in a menu-bar dropdown, a quick-add box, a 7:00 weekday notification, and launch at login
+**How I interact with it:**
+- **Notifications:** the morning briefing and change alerts. This is the main way I use it.
+- **The briefing page:** a formatted HTML page that opens in the browser when I click a notification (§7.1). A Markdown copy is saved too.
+- **The `briefing` terminal command:** install, status, run it now, debug.
 
 ### Non-goals
 
+- Any visible app UI: windows, menu bar, Dock
 - Email, or notifications from other apps (macOS doesn't allow reading them)
-- News headlines (dropped from scope)
-- iPhone app (the shared core could support one later)
-- Editing or deleting existing events
+- News headlines
+- Creating, editing or deleting events. The tool **only reads** calendars
+- iPhone app
 
 ## 2. Platform & tooling
 
 | | Choice | Why |
 |---|---|---|
 | Language | **Swift 6** | Native, safe concurrency |
-| UI | **SwiftUI** `MenuBarExtra` | Apple's own menu-bar API |
-| Minimum macOS | **14 (Sonoma)** | Needed for the new EventKit "full access" permissions. This Mac runs macOS 26.5 |
-| Build | **Swift Package Manager** for core + CLI; **Xcode** project for the app | The CLI builds with the Command Line Tools already installed. **The app needs Xcode installed** (it isn't yet) |
+| Minimum macOS | **14 (Sonoma)** | Needed for EventKit "full access" permissions. This Mac runs macOS 26.5 |
+| Build | **Swift Package Manager** + `scripts/build-app.sh` to assemble `Briefing.app` | **No Xcode**: it can't be installed on this macOS version. The Command Line Tools have everything needed (EventKit, CoreLocation, UserNotifications) |
 | CLI parsing | `swift-argument-parser` | Apple's standard library for command-line tools |
-| Signing | Personal Apple ID, "Sign to Run Locally" | Fine for my own Mac. A paid developer account is only needed to share it with others |
+| Signing | Self-signed code-signing certificate (Keychain Access) | Keeps permissions across rebuilds (A.6). A paid developer account isn't needed for my own Mac |
 
 ## 3. Architecture
 
+**One executable, two modes**, shipped inside an invisible app bundle:
+
 ```
-┌──────────────────────────┐   ┌──────────────────────────────┐
-│ briefing (CLI)  — v1     │   │ Briefing.app (menu bar) — v2  │
-│  today / add / calendars │   │  dropdown · quick-add ·      │
-│  setup                   │   │  scheduler · notifications    │
-└────────────┬─────────────┘   └───────────────┬──────────────┘
-             └──────────────┬──────────────────┘
-                            ▼
- ┌──────────────────────────────────────────────────────────┐
- │ BriefingCore (Swift package, shared)                     │
- │                                                          │
- │  CalendarProvider ── EventKitProvider (iCloud/Google/    │
- │                       Outlook via Internet Accounts)     │
- │  RemindersService ── EventKit                            │
- │  LocationService ─── CoreLocation → IP lookup → config   │
- │  WeatherService ──── Open-Meteo                          │
- │            │                                             │
- │            ▼                                             │
- │  DayContext ──► Summarizer ──► ClaudeClient (HTTP)       │
- │                 EventParser ─┘                           │
- │            │                                             │
- │            ▼                                             │
- │  Briefing (model) ──► Markdown renderer / SwiftUI views  │
- └──────────────────────────────────────────────────────────┘
+~/Applications/Briefing.app            (LSUIElement: no Dock icon, no UI)
+└── Contents/MacOS/briefing
+       │
+       ├── briefing agent      ← started at login by launchd, keeps running
+       │     the only process that touches Calendars, Reminders, Location
+       │
+       └── briefing <command>  ← me, in Terminal (via ~/.local/bin/briefing symlink)
+             install · uninstall · status · today · open · check
+             asks the agent to do the work (§3.2)
 ```
 
-**Key decision: fetch first, then make one model call.** Plain code collects the data the same way every time, and then a single Claude call writes a prioritized summary that points out conflicts, back-to-back meetings and free blocks. Claude has no tools and can't change anything. The CLI and the app are thin layers over `BriefingCore`.
+### 3.1 The agent
+
+```
+ launchd (login, KeepAlive)
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │ briefing agent                                               │
+ │                                                              │
+ │  MorningScheduler ──(7:00 Mon–Fri, catch-up)──┐              │
+ │  CalendarWatcher ───(event changed)───────────┤              │
+ │  CommandListener ───(from CLI)────────────────┤              │
+ │                                               ▼              │
+ │                                      BriefingPipeline        │
+ │   CalendarProvider(s) ─┐                      │              │
+ │   RemindersService ────┼─► DayContext ─► Summarizer ─► Claude│
+ │   LocationService ─────┤                      │              │
+ │   WeatherService ──────┘                      ▼              │
+ │                                  OutputWriter · Notifier     │
+ │                                  (~/Briefings, notification) │
+ └──────────────────────────────────────────────────────────────┘
+```
+
+All the logic lives in `BriefingCore`. The executable is a thin shell: it either starts the agent or runs a CLI command.
+
+**Key decision: fetch first, then make one model call.** Plain code collects the data the same way every time, and a single Claude call writes a prioritized summary that points out conflicts, back-to-back meetings and free blocks. Claude has no tools and can't change anything.
+
+### 3.2 How CLI commands reach the agent
+
+macOS permissions belong to the **app**. If I run a command in Terminal, macOS would attribute it to Terminal, and Terminal can't get location (milestone 1 finding). So CLI commands that need data **ask the running agent** instead of fetching data themselves:
+
+- The CLI posts a request through `DistributedNotificationCenter` (`com.thakur90.briefing.request`, carrying a request ID and the command).
+- The agent runs it and writes the result to `~/Library/Application Support/Briefing/responses/<id>.json`.
+- The CLI waits for that file (30 s timeout). If the agent isn't running, it says so and suggests `briefing install`.
+
+Commands that only manage files or launchd (`install`, `uninstall`, `status`, `open`) don't need the agent.
 
 ## 4. Calendars
 
 ### 4.1 Apple, Google and Outlook through EventKit
 
-EventKit combines every account added under **System Settings → Internet Accounts** (iCloud, Google, Microsoft Exchange/Outlook, CalDAV). Reading and writing go through one API, with no Google or Microsoft login code in this project. **Adding Outlook later is a settings change.** It then appears in `briefing calendars` and in the app's Settings.
+EventKit combines every account added under **System Settings → Internet Accounts** (iCloud, Google, Microsoft Exchange/Outlook, CalDAV). Everything is read through one API, with no Google or Microsoft login code in this project, and the same API **tells us when anything changes** (§4.3). **Adding Outlook later is a settings change**, and its calendars then show up in `briefing status`.
 
 ### 4.2 Provider protocol (extensibility)
 
@@ -77,42 +102,44 @@ protocol CalendarProvider: Sendable {
     var id: String { get }                       // "eventkit", "google", "msgraph"
     func calendars() async throws -> [CalendarInfo]
     func events(in range: DateInterval) async throws -> [Event]
-    func add(_ event: NewEvent) async throws -> Event
+    /// Emits when the provider's data *may* have changed. Coarse: callers re-fetch and diff.
+    func changes() -> AsyncStream<Void>
 }
 ```
 
 | Provider | When |
 |---|---|
-| `EventKitProvider` | **v1, the default.** Covers every account in Internet Accounts |
-| `GoogleCalendarProvider` (REST + OAuth) | Later, only if a Google-only feature is needed |
+| `EventKitProvider` | **The default.** Covers every account in Internet Accounts |
+| `GoogleCalendarProvider` (REST + OAuth) | Later, only if a Google-only feature is needed. `changes()` would poll (e.g. every 5 min), since push needs a public server |
 | `MicrosoftGraphProvider` (REST + OAuth) | Later, for work Outlook accounts that block Internet Accounts |
 
 Events that come from more than one provider are de-duplicated by start time, end time and title.
 
-### 4.3 Adding events
+### 4.3 Live updates
 
-```bash
-briefing add "Lunch with Sam tomorrow 12:30 for 1h at Tartine"
-briefing add --title "Dentist" --start "2026-10-24 09:00" --duration 45m
-briefing add "…" --calendar "Work (Google)"
-```
+When an event is added, moved or cancelled, today's briefing updates on its own. That covers changes made in Calendar on the Mac, on the iPhone, on the web, or by an invite arriving, as soon as the change syncs to this Mac.
 
-- **Default calendar: an iCloud calendar** chosen once in `briefing setup` (or in app Settings). `--calendar` overrides it per event.
-- **Free text** is turned into a `NewEvent` by a small Claude call that returns structured output. **Flags** skip the model completely. If a time is missing or ambiguous, it asks instead of guessing.
-- It **always asks for confirmation** and warns about conflicts before saving:
-  ```
-  Lunch with Sam — Thu Oct 23, 12:30–13:30 @ Tartine → iCloud: Home
-  ⚠ Overlaps "1:1 with Priya" (13:00–13:30)
-  Add it? [y/N]
-  ```
-- In the app, the same flow is a quick-add text field → preview card → **Add** button.
+**How it works** (`CalendarWatcher`):
+
+1. **Listen:** EventKit posts `EKEventStoreChanged` whenever anything in any calendar or reminder list changes, including changes that arrive by sync.
+2. **Debounce (10 s):** a sync usually fires several notifications in a row. The watcher waits until things settle.
+3. **Re-fetch and diff:** read the rest of today's events and compare them with the last snapshot. Events are matched by their EventKit identifier and compared on start/end time, title, location and calendar. The result is `added` / `moved` / `cancelled` / `renamed`. Changes outside today, or edits only to notes, are ignored.
+4. **Refresh in two steps:**
+   - **Schedule section: updated instantly** from EventKit data. Plain code, no Claude call, no cost.
+   - **AI summary: regenerated** after a meaningful change, **at most once every 15 min** and **at most 6 times a day** (both configurable).
+5. **Save and notify:** rewrite today's briefing atomically with an "Updated 2:14 PM" stamp and a **"Changes since this morning"** section. Then send a notification: *"New: Dentist at 3:00 PM (Home)"*, *"Moved: 1:1 with Priya → 4:30 PM"*, *"Cancelled: Team lunch"*. Several changes together are grouped into one notification.
+
+**Rules:**
+- It only updates **today's existing briefing.** Before the 7:00 run or on weekends, changes just update the snapshot and are picked up by the next run.
+- Reminders share the same change notification, so the reminders section refreshes too. Notifications are sent only for calendar changes.
+- While the Mac sleeps nothing runs. On wake, EventKit syncs, the notification fires, and the briefing catches up.
 
 ## 5. Other data sources
 
 | Service | Source | Notes |
 |---|---|---|
 | Reminders | EventKit | Due today, overdue, and flagged; optionally filtered by list |
-| Location | CoreLocation | Current location. If that fails or is denied, falls back to an IP-based lookup, then to a city in config |
+| Location | CoreLocation, in the agent | Current location, refreshed before each briefing; the last fix is cached. If it fails, falls back to an IP-based lookup, then to a city in config |
 | Weather | [Open-Meteo](https://open-meteo.com) | Free, no API key. (Apple WeatherKit would need the paid developer account) |
 
 Each service returns data or an error. **If one source fails, the briefing still appears** and notes what's missing.
@@ -124,41 +151,64 @@ Each service returns data or an error. **If one source fails, the briefing still
 - **Refusal fallback:** `fallbacks: "default"` with the `anthropic-beta: server-side-fallback-2026-07-01` header. Always check `stop_reason`.
 - **Structured output** via `output_config.format` (JSON schema), decoded into a `Briefing` struct:
   `headline` · `schedule` (events + notes) · `reminders` (ranked) · `weatherNote` · `notificationText` (no more than about 200 characters)
-- **Prompt caching:** not used, since it runs once a day.
-- **API key:** stored in the macOS **Keychain**. Both the CLI and the app read it there.
+- **Prompt caching:** not used. Runs are at least 15 min apart, so the cache would have expired.
+- **API key:** stored in the macOS **Keychain**; only the agent reads it.
 
-**Estimated cost:** briefing ~$0.07/day; free-text add ~$0.01 each → **≈ $2/month**.
+**Estimated cost:** ~$0.07 per summary. Morning run + a typical 1–2 refreshes/day ≈ **$3–5/month**; the 6-per-day cap limits the worst case to ~$0.50/day.
 
-## 7. Scheduling & notifications
+## 7. Notifications & output
 
-| | v1 (CLI) | v2 (app) |
+| | |
+|---|---|
+| Morning notification | Title: the headline ("Busy morning, 3 meetings before noon"). Body: `notificationText`. **Clicking it opens today's briefing** |
+| Change notification | "New / Moved / Cancelled: …". Clicking it opens the briefing at "Changes since this morning" |
+| Framework | `UserNotifications`, posted by the agent (permission is asked once) |
+| Files | `~/Briefings/YYYY-MM-DD.html` (opened on click), `.md` (plain-text copy), `.context.json` (raw data, for debugging) |
+| Quiet when needed | Respects Focus / Do Not Disturb (standard macOS behaviour). `liveUpdates.notifyOnChanges` turns change alerts off |
+
+### 7.1 The briefing page
+
+Clicking any notification opens `~/Briefings/YYYY-MM-DD.html` in the default browser. The approved layout is in **[`docs/mockups/briefing.html`](mockups/briefing.html)** (sample data). Sections, top to bottom:
+
+| # | Section | Content |
 |---|---|---|
-| 7:00 weekday run | launchd agent runs `briefing today --notify` | The app (launched at login via `SMAppService`) runs it at 7:00 Mon–Fri, and catches up after the Mac wakes |
-| Notification | `osascript` (basic) | `UserNotifications`: clicking opens the dropdown |
-| Output | `~/Briefings/YYYY-MM-DD.md` + DayContext JSON | Same files, plus the SwiftUI dropdown |
+| 1 | Header | Date, Claude's headline, "Generated 7:00 AM · Updated 2:14 PM" |
+| 2 | Changes since this morning | Only shown after a change: **New** / **Moved** / **Cancelled** tags. Change notifications link here (`#changes`) |
+| 3 | Your day | Claude's short paragraph: priorities, prep, free time, weather advice |
+| 4 | Weather | Location, current temp, high/low, one-line note, hourly strip (temp + rain chance) |
+| 5 | Schedule | Each event: time, calendar colour, calendar · account, location. Notes: back-to-back, conflicts, moved/added. Free blocks highlighted; cancelled events struck through |
+| 6 | Reminders | Due today; overdue highlighted |
+| 7 | Footer | Sources used, and any that failed |
 
-A once-per-day guard stops a briefing from being generated twice, whether by both the CLI and the app or by the run that catches up after wake.
+- A single self-contained file: inline CSS, no JavaScript, no external requests. It follows the Mac's light/dark mode.
+- Rendered by `HTMLRenderer` from the same `Briefing` model as the Markdown copy. Event titles and other calendar text are HTML-escaped.
+- The "leave by 2:40" travel-time note in the mockup is a **future idea** (§16); v1 doesn't calculate travel time.
 
-Full design of the v1 scheduler: **Appendix A**.
+Scheduling and the agent's lifecycle are covered in detail in **Appendix A**.
 
-## 8. Permissions (main technical risk)
+## 8. Permissions
 
-Calendars, Reminders and Location each need user permission, and macOS asks for it based on usage-description keys in an **Info.plist**:
-`NSCalendarsFullAccessUsageDescription` · `NSRemindersFullAccessUsageDescription` · `NSLocationWhenInUseUsageDescription`
+All permissions are granted to **`Briefing.app`** (bundle ID `com.thakur90.briefing`), and only the agent uses them:
 
-- **App (v2):** standard. The keys go in the app's Info.plist.
-- **CLI (v1):** a plain command-line binary has no Info.plist. We **embed one in the binary** (linker flag `-sectcreate __TEXT __info_plist`) so macOS can show the prompts. Run from Terminal, permission is granted to Terminal. Run by launchd, it's granted to the binary itself.
-- → **Milestone 1 tests this first.**
+| Permission | Info.plist key | Used for |
+|---|---|---|
+| Calendars (full access) | `NSCalendarsFullAccessUsageDescription` | Reading events (macOS has no read-only option) |
+| Reminders (full access) | `NSRemindersFullAccessUsageDescription` | Reading due reminders |
+| Location | `NSLocationWhenInUseUsageDescription`, `NSLocationUsageDescription` | Weather |
+| Notifications | (none needed) | Briefing and change alerts |
+
+**Milestone 1 findings:** a bare CLI binary with an embedded Info.plist **gets Calendars and Reminders**, but **never gets a Location prompt**, whether run from Terminal or launchd. That's why the tool is an app bundle with a long-running agent. Milestone 1 finishes by checking that `Briefing.app`, started by launchd, gets all four permissions.
 
 ## 9. Security & privacy
 
 - Sent to Claude: event titles, times and locations; reminder titles; and weather. Calendars or lists marked private in config are never sent.
-- Event titles from invites are written by other people. The summarizer has no tools, and the prompt treats that data as content, not instructions. Nothing is written to a calendar without my confirmation.
+- Event titles from invites are written by other people. The summarizer has no tools, and the prompt treats that data as content, not instructions. The tool never writes to calendars.
 - The API key is kept only in the Keychain. Config holds no secrets.
+- The CLI → agent channel (§3.2) only accepts a fixed set of commands. Responses are written to my own Application Support folder.
 
 ## 10. Configuration
 
-Shared by the CLI and the app: `~/Library/Application Support/Briefing/config.json`. Edited with `briefing setup` or in the app's Settings.
+`~/Library/Application Support/Briefing/config.json`, edited by hand. The agent picks up changes automatically.
 
 ```json
 {
@@ -168,10 +218,15 @@ Shared by the CLI and the app: `~/Library/Application Support/Briefing/config.js
   "location": { "mode": "current", "fallbackCity": "San Francisco" },
   "calendars": {
     "providers": ["eventkit"],
-    "exclude": ["Holidays in United States"],
-    "defaultForNewEvents": { "account": "iCloud", "calendar": "Home" }
+    "exclude": ["Holidays in United States"]
   },
   "reminders": { "lists": [] },
+  "liveUpdates": {
+    "enabled": true,
+    "notifyOnChanges": true,
+    "minMinutesBetweenSummaries": 15,
+    "maxSummariesPerDay": 6
+  },
   "model": { "name": "claude-opus-5-5", "effort": "medium" }
 }
 ```
@@ -180,19 +235,24 @@ Shared by the CLI and the app: `~/Library/Application Support/Briefing/config.js
 
 ```
 pet-projects/
-├── Package.swift                  # BriefingCore + briefing CLI
+├── Package.swift                  # BriefingCore + briefing executable
 ├── Sources/
 │   ├── BriefingCore/
-│   │   ├── Calendars/             # CalendarProvider, EventKitProvider, dedupe
+│   │   ├── Agent/                 # Agent, MorningScheduler, CommandListener
+│   │   ├── Calendars/             # CalendarProvider, EventKitProvider, CalendarWatcher, diff, dedupe
 │   │   ├── Services/              # Reminders, Location, Weather
-│   │   ├── Claude/                # ClaudeClient, Summarizer, EventParser
-│   │   ├── Models/                # Event, NewEvent, Reminder, DayContext, Briefing
-│   │   ├── Render/                # Markdown renderer
+│   │   ├── Claude/                # ClaudeClient, Summarizer
+│   │   ├── Models/                # Event, EventChange, Reminder, DayContext, Briefing
+│   │   ├── Output/                # HTMLRenderer, MarkdownRenderer, OutputWriter, Notifier
+│   │   ├── Scheduling/            # ScheduleGuard, RunLock, RunStateStore, LaunchAgentInstaller
 │   │   └── Config/                # config.json + Keychain
-│   └── briefing/                  # CLI (swift-argument-parser), embedded Info.plist
-├── App/                           # v2: Xcode project, SwiftUI MenuBarExtra
+│   └── briefing/                  # entry point: `agent` mode + CLI commands
+├── Support/Info.plist             # bundle Info.plist (LSUIElement, usage descriptions)
+├── scripts/build-app.sh           # swift build → Briefing.app → sign → ~/Applications
 ├── Tests/BriefingCoreTests/
-└── docs/design.md
+└── docs/
+    ├── design.md
+    └── mockups/briefing.html      # approved layout of the briefing page
 ```
 
 ## 12. Error handling
@@ -200,77 +260,97 @@ pet-projects/
 | Failure | Behaviour |
 |---|---|
 | A data source fails | Briefing still appears; the missing section is noted |
-| Permission denied | Clear message linking to System Settings → Privacy & Security |
+| Permission denied | The notification says which permission is missing and opens System Settings → Privacy & Security when clicked |
 | Claude API error or refusal | Retry, then server-side fallback, then a **plain summary** (schedule, reminders and weather without the AI write-up) |
-| Free-text add is ambiguous | Ask a follow-up question; nothing is saved |
+| Burst of calendar changes | Debounced (10 s); AI refresh limited to once every 15 min and 6 times a day; the schedule section is always current |
+| Agent crashes | launchd restarts it (`KeepAlive`, 30 s throttle); on start it runs the catch-up check |
+| Agent not running when the CLI is used | The CLI says so and suggests `briefing install` or `briefing status` |
 
 ## 13. Testing
 
-- XCTest / Swift Testing for normalization, dedupe, conflict detection, the Markdown output, and decoding Claude JSON (from fixtures).
-- Event parser checks: about 20 phrases ("next Tue 3pm", "lunch tomorrow for 90 min") compared to the expected `NewEvent`.
-- Protocol-based fakes for EventKit, location and network, so tests never touch real calendars.
-- `--dry-run` on `today` (no Claude call) and on `add` (doesn't save).
+- Swift Testing for normalization, dedupe, the Markdown output, and decoding Claude JSON (from fixtures).
+- **Watcher:** diff cases (added / moved / cancelled / renamed / notes-only ignored / other day ignored), debounce, and the AI refresh limits.
+- **Scheduler:** next-run calculation, weekend skip, catch-up after sleep or login, time-zone change.
+- Protocol-based fakes for EventKit, location, network and the clock, so tests never touch real calendars or wait in real time.
+- `briefing today --dry-run`: the agent builds the DayContext and the CLI prints it (no Claude call, no files written).
+- Manual: add, move and delete an event in Calendar (Mac and iPhone) → check that the briefing and notification update.
 
 ## 14. Milestones
 
-1. **Permissions test (CLI):** a Swift binary with an embedded Info.plist that reads today's events, reminders and location. *(Removes the biggest risk first.)*
-2. **Read path:** EventKitProvider, Reminders, Weather, DayContext, `briefing today --dry-run`.
-3. **Summarizer:** ClaudeClient, structured output, plain-summary fallback, Markdown output.
-4. **Add events:** `briefing setup` (pick the iCloud default), flags, free text, conflict check.
-5. **Schedule (CLI):** launchd agent, weekdays at 7:00, notification.
-6. **Menu-bar app:** Xcode project, MenuBarExtra dropdown, quick-add, built-in scheduler, notifications, launch at login, Settings. The launchd agent is removed once the app takes over.
-7. **Polish:** tune the prompt using real briefings.
+1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. **Remaining:** `scripts/build-app.sh` builds an invisible `Briefing.app`; launchd starts it; it gets Calendars, Reminders, Location and Notifications.
+2. **Read path:** EventKitProvider, Reminders, Location (+ IP fallback), Weather, DayContext, CLI → agent requests, `briefing today --dry-run`.
+3. **Summarizer & output:** ClaudeClient, structured output, plain-summary fallback, HTML page (matching the mockup) + Markdown, notification that opens the page.
+4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up), `briefing install / uninstall / status`.
+5. **Live updates:** CalendarWatcher (listen → debounce → diff), instant schedule refresh, limited AI refresh, change notifications.
+6. **Polish:** tune the prompt using real briefings.
 
-## 15. Open questions
+## 15. Decisions log
 
-- **Q1:** Install Xcode now (free, from the App Store, ~10 GB), or wait until milestone 6? Milestones 1–5 only need the Command Line Tools, which are already installed.
+| Date | Decision |
+|---|---|
+| 2026-10-22 | Mac only, Swift; Gmail and news dropped; reminders kept |
+| 2026-10-23 | Read-only: live updates on calendar changes instead of adding events |
+| 2026-10-23 | No visible UI: background agent + notifications (no menu bar, no window) |
+| 2026-10-23 | Built without Xcode (it can't be installed on this macOS version) |
+| 2026-10-27 | Notification click opens an HTML briefing page; layout approved (`docs/mockups/briefing.html`) |
+
+## 16. Future ideas
+
+- Travel time to events with a location ("leave by 2:40"), e.g. via MapKit
+- Direct Google / Microsoft Graph providers (§4.2)
+- Evening wrap-up and tomorrow preview
 
 ---
 
-## Appendix A — Scheduling with a launchd agent (v1)
+## Appendix A — The background agent and scheduling
 
-macOS's built-in scheduler, **launchd**, runs `briefing` at 7:00 on weekdays until the menu-bar app (milestone 6) takes over scheduling.
+The agent is one long-running process, started by launchd at login and kept alive. It **schedules the 7:00 run itself**, watches calendars, and answers CLI requests. A separate launchd calendar job isn't needed: the agent has to run all day anyway for live updates and location, and a job that launchd starts separately couldn't get location (§8).
 
 ### A.1 Components
 
 ```
- briefing install / uninstall / status / run-now         (CLI commands)
+ briefing install / uninstall / status            (CLI)
         │
         ▼
- ┌────────────────────────┐     writes      ┌───────────────────────────────────────────┐
- │ LaunchAgentInstaller   │───────────────► │ ~/Library/LaunchAgents/                   │
- │  • PlistBuilder        │  launchctl      │   com.thakur90.briefing.plist             │
- │  • BinaryInstaller     │  bootstrap      └─────────────────────┬─────────────────────┘
- │  • LaunchctlClient     │                                       │ 7:00 Mon–Fri / login / wake
+ ┌────────────────────────┐   writes + loads   ┌──────────────────────────────────────┐
+ │ LaunchAgentInstaller   │──────────────────► │ ~/Library/LaunchAgents/              │
+ │  • AppInstaller        │                    │   com.thakur90.briefing.plist        │
+ │  • PlistBuilder        │                    └──────────────────┬───────────────────┘
+ │  • LaunchctlClient     │                                       │ login / crash restart
  └────────────────────────┘                                       ▼
-                                          briefing today --notify --scheduled
-                                                                  │
- ┌────────────────────────────────────────────────────────────────▼───────────────────┐
- │ ScheduledRunCoordinator                                                            │
- │   ScheduleGuard ─► RunLock ─► NetworkWaiter ─► BriefingPipeline ─► OutputWriter    │
- │                                                    (BriefingCore)      │           │
- │                                                                         ▼           │
- │                                                     Notifier · RunStateStore · Log │
- └─────────────────────────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │ Agent  (Briefing.app/Contents/MacOS/briefing agent)                              │
+ │                                                                                  │
+ │  Triggers:  MorningScheduler · CalendarWatcher · CommandListener                 │
+ │                     │                │                 │                         │
+ │                     ▼                ▼                 ▼                         │
+ │  RunCoordinator ─► ScheduleGuard ─► RunLock ─► NetworkWaiter ─► BriefingPipeline │
+ │                                                                       │          │
+ │                                     OutputWriter · Notifier · RunStateStore · Log│
+ └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-All components live in `BriefingCore/Scheduling/`, except the CLI commands themselves. Each one sits behind a protocol so tests can swap in fakes (clock, filesystem, launchctl, network).
+Every component sits behind a protocol, so tests can swap in fakes (clock, filesystem, launchctl, network, EventKit).
 
 | Component | Responsibility | Key details |
 |---|---|---|
-| **PlistBuilder** | Turns config into the agent plist | Builds from `runAt` and `weekdaysOnly`; encodes with `PropertyListEncoder`; the output is deterministic, so reinstalling with the same config produces the same file |
-| **BinaryInstaller** | Puts the CLI at a fixed path | Copies the built binary to `~/.local/bin/briefing` and signs it (see A.6). launchd has no shell `PATH`, so every path is absolute |
-| **LaunchctlClient** | Wraps `launchctl` | `bootstrap gui/<uid> <plist>` · `bootout gui/<uid>/com.thakur90.briefing` · `kickstart -k …` (run now) · `print …` (status). Runs via `Process`; turns failures into typed errors |
-| **LaunchAgentInstaller** | Puts the above together | `install`: write plist → validate (`plutil -lint`) → bootout old → bootstrap new. Safe to run again. `uninstall` reverses it and leaves briefings and logs in place |
-| **ScheduledRunCoordinator** | Entry point for `--scheduled` runs | Runs the steps below in order and **always ends with exit code 0** (launchd doesn't retry calendar jobs, and non-zero codes only clutter the system log) |
-| **ScheduleGuard** | Decides whether this run should happen | Rules in A.3. Uses an injected `Clock` and `Calendar` so it can be tested for any date and time |
-| **RunLock** | Stops two runs at once (scheduled + manual) | `flock` on `~/Library/Application Support/Briefing/run.lock`; if the lock is taken, exit quietly |
-| **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`; waits for `.satisfied` for up to 120 s. If it times out, the run goes ahead offline, so the summary is the plain version and weather is skipped |
-| **BriefingPipeline** | The actual work (§3–§6) | Collect → DayContext → Summarizer → `Briefing`. Same code that `briefing today` runs by hand |
-| **OutputWriter** | Saves the results | Writes `YYYY-MM-DD.md` + `YYYY-MM-DD.context.json` **atomically** (temp file + rename), so a half-finished run never leaves a partial briefing |
-| **Notifier** | Notifies me | v1: `osascript -e 'display notification …'`. Limitation: clicking it opens Script Editor, not the briefing. If `terminal-notifier` is installed, it's used with `-open file://…/YYYY-MM-DD.md` |
-| **RunStateStore** | Records what happened | `state.json`: last run start and end, outcome (`full` / `plain` / `skipped:<reason>` / `failed`), and which sources failed. Read by `briefing status` |
-| **Log** | Diagnostics | `os.Logger` (subsystem `com.thakur90.briefing`) plus a rotating file at `~/Library/Logs/Briefing/briefing.log` (1 MB × 3). launchd's own stdout/stderr go to `launchd.log`, which only catches crashes |
+| **AppInstaller** | Installs the app | Copies the built `Briefing.app` to `~/Applications`, signs it (A.6), and symlinks `~/.local/bin/briefing` → the executable inside it |
+| **PlistBuilder** | Generates the agent plist | Deterministic output, validated with `plutil -lint` |
+| **LaunchctlClient** | Wraps `launchctl` | `bootstrap` / `bootout` / `kickstart -k` (restart) / `print` (status), run via `Process`, with typed errors |
+| **LaunchAgentInstaller** | Puts the above together | `install`: app → plist → bootout old → bootstrap new. Safe to run again. `uninstall` reverses it and keeps briefings, logs and config |
+| **Agent** | Process lifecycle | Starts the three triggers, requests permissions on first launch, reloads config when the file changes, shuts down cleanly on `SIGTERM` |
+| **MorningScheduler** | Fires the 7:00 weekday run | See A.3 |
+| **CalendarWatcher** | Fires refreshes on calendar changes | §4.3 |
+| **CommandListener** | Handles CLI requests | §3.2. Fixed set of commands: `today`, `today --dry-run`, `check` |
+| **RunCoordinator** | Runs one briefing generation | Steps in A.4. Each trigger says what kind of run it wants: `morning`, `refresh(changes)`, or `manual` |
+| **ScheduleGuard** | Decides whether a morning run should happen | Rules in A.3. Uses an injected `Clock` and `Calendar` |
+| **RunLock** | One generation at a time | An in-process actor, plus `flock` on `run.lock` in case a second agent instance ever starts |
+| **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`, up to 120 s. If it times out: plain summary, weather skipped |
+| **BriefingPipeline** | The actual work (§4–§6) | Collect → DayContext → Summarizer → `Briefing` |
+| **OutputWriter** | Saves the results | `.md`, `.html` and `.context.json`, written **atomically** (temp file + rename) |
+| **Notifier** | Notifications | `UserNotifications`. A click opens the briefing via `NSWorkspace`. Several changes are grouped into one notification |
+| **RunStateStore** | Records what happened | `state.json`: last run per kind, outcome (`full` / `plain` / `skipped:<reason>` / `failed`), failed sources, AI refreshes used today. Read by `briefing status` |
+| **Log** | Diagnostics | `os.Logger` (subsystem `com.thakur90.briefing`) plus a rotating file at `~/Library/Logs/Briefing/briefing.log` (1 MB × 3) |
 
 ### A.2 Agent plist
 
@@ -284,108 +364,92 @@ Generated by PlistBuilder, never edited by hand:
   <key>Label</key>             <string>com.thakur90.briefing</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/neha/.local/bin/briefing</string>
-    <string>today</string>
-    <string>--notify</string>
-    <string>--scheduled</string>
+    <string>/Users/neha/Applications/Briefing.app/Contents/MacOS/briefing</string>
+    <string>agent</string>
   </array>
-
-  <!-- 7:00 Mon–Fri. Weekday: 1 = Monday … 5 = Friday (0 and 7 = Sunday) -->
-  <key>StartCalendarInterval</key>
-  <array>
-    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-  </array>
-
-  <!-- Also run at login, to catch up if the Mac was off at 7:00 -->
-  <key>RunAtLoad</key>         <true/>
-
-  <!-- Background work: lower CPU/IO priority -->
-  <key>ProcessType</key>       <string>Background</string>
-
+  <key>RunAtLoad</key>         <true/>   <!-- start at login -->
+  <key>KeepAlive</key>         <true/>   <!-- restart if it exits or crashes -->
+  <key>ThrottleInterval</key>  <integer>30</integer>
   <key>StandardOutPath</key>   <string>/Users/neha/Library/Logs/Briefing/launchd.log</string>
   <key>StandardErrorPath</key> <string>/Users/neha/Library/Logs/Briefing/launchd.log</string>
 </dict>
 </plist>
 ```
 
-Times are in the Mac's **local time zone**, so they follow daylight saving changes and travel automatically.
+`launchd.log` only catches crashes; normal logging goes through Log.
 
-### A.3 When it runs
+### A.3 MorningScheduler
 
-| Situation at 7:00 | launchd behaviour | Result |
-|---|---|---|
-| Awake, logged in | Fires on time | Briefing + notification at 7:00 |
-| **Asleep** (lid closed) | Fires **once on wake**; missed runs are merged into one | Briefing when I open the laptop |
-| **Shut down** / logged out | Doesn't fire, and launchd won't catch up later | `RunAtLoad` fires at the next login |
-| Weekend | Not scheduled | — |
+The scheduler works out the next run time (next weekday at `runAt`, in **local time**) and sleeps until then. It also **re-checks** whenever something could have made it miss a run or changed the timing:
 
-**ScheduleGuard rules** (only in `--scheduled` mode; checked in order, and the first match skips the run):
+| Event | What it does |
+|---|---|
+| Agent starts (login, or restart after a crash) | Catch-up check |
+| Mac wakes (`NSWorkspace.didWakeNotification`) | Catch-up check (a timer doesn't fire during sleep) |
+| Clock or time zone changes (`NSSystemClockDidChange`, `NSSystemTimeZoneDidChange`) | Recalculate the next run |
+| `runAt` / `weekdaysOnly` changed in config | Recalculate the next run |
 
-1. Today isn't a scheduled day (e.g. a weekend login) → `skipped:not-a-run-day`
-2. It's before `runAt` (e.g. logging in at 6:30) → `skipped:too-early` (the 7:00 run will handle it)
-3. Today's briefing already exists → `skipped:already-done`
-4. Otherwise → run
+**Catch-up check = ScheduleGuard** (checked in order; the first match skips the run):
+1. Today isn't a run day → `skipped:not-a-run-day`
+2. It's before `runAt` → `skipped:too-early` (the timer will handle it)
+3. Today's morning briefing already exists → `skipped:already-done`
+4. Otherwise → **run now**
 
-A manual `briefing today` skips the guard and always regenerates, overwriting today's file.
+| Situation at 7:00 | Result |
+|---|---|
+| Awake | Runs on time |
+| Asleep (lid closed) | Runs on wake |
+| Shut down / logged out | Runs at login (agent start) |
+| Weekend | Nothing |
 
-### A.4 Sequence of a scheduled run
+### A.4 Sequence of a run
 
 ```
-launchd ─► briefing today --notify --scheduled
-  1. ScheduleGuard.check(now)              → skip? record + exit 0
-  2. RunLock.tryAcquire()                  → busy? exit 0
-  3. NetworkWaiter.wait(≤120s)             → offline? continue (plain mode)
+trigger (morning | refresh(changes) | manual)
+  1. ScheduleGuard.check(now)         [morning only] → skip? record and stop
+  2. RunLock.acquire()                → a refresh during a run is queued, not dropped
+  3. NetworkWaiter.wait(≤120s)        → offline? continue (plain mode)
   4. BriefingPipeline.run(today)
        collectors in parallel (EventKit, Reminders, Location→Weather)
+       refresh: schedule always updated; AI only if allowed by the limits (§4.3)
        Summarizer → Claude (retry ×2 → server fallback → plain summary)
-  5. OutputWriter.write(md, context.json)  (atomic)
-  6. Notifier.post(briefing.notificationText)
-  7. RunStateStore.record(outcome)          → release lock → exit 0
+  5. OutputWriter.write(md, html, context.json)   (atomic)
+  6. Notifier.post(morning summary | change summary)
+  7. RunStateStore.record(outcome)    → release lock
 ```
 
-Typical run time is 5–20 s, mostly the Claude call.
+Typical run: 5–20 s (mostly the Claude call). Overall timeout: 3 min, after which the plain summary is written.
 
 ### A.5 CLI commands
 
-| Command | What it does |
-|---|---|
-| `briefing install` | Installs the binary, writes the plist, loads it. Also asks for Calendar, Reminders and Location permission *now*, so the 7:00 run never sits waiting on a prompt |
-| `briefing uninstall` | Unloads and removes the agent (keeps briefings, logs, config) |
-| `briefing status` | Shows whether it's loaded, the next run time, the last run (time, outcome, failed sources), and permission status |
-| `briefing run-now` | `launchctl kickstart`, i.e. runs the *scheduled* path right now with the guard on (useful for testing the agent itself) |
-| `briefing today` | Manual run; no guard |
-
-Changing `runAt` or `weekdaysOnly` in config → run `briefing install` again to regenerate the plist.
+| Command | Needs agent? | What it does |
+|---|---|---|
+| `briefing install` | No | Installs the app and agent, then starts it. The agent asks for all permissions on its first launch |
+| `briefing uninstall` | No | Stops and removes the agent and app (keeps briefings, logs, config) |
+| `briefing status` | No | Agent loaded and running? Next morning run, last runs and outcomes, AI refreshes used today, permission status (from `state.json`), and calendars found |
+| `briefing open` | No | Opens today's briefing |
+| `briefing today [--dry-run]` | Yes | Generates the briefing now (`--dry-run`: prints the DayContext only) |
+| `briefing check` | Yes | Permission check (milestone 1) |
 
 ### A.6 Permissions & code signing
 
-macOS remembers Calendar, Reminders and Location permission **per code signature** (its "designated requirement"), so the signature has to stay the same across rebuilds:
+macOS remembers permissions **per code signature** (its "designated requirement"):
 
-- An **ad-hoc** signature (`codesign -s -`) changes with every build, so **macOS would ask for permissions again after each rebuild**. That's fine during development, but not for the installed binary.
-- **Plan:** BinaryInstaller signs with a **stable certificate** and identifier `com.thakur90.briefing`. That's either the free "Apple Development" certificate (created by Xcode when signing in with my Apple ID) or a self-signed code-signing certificate made in Keychain Access. Either way, the designated requirement stays the same across rebuilds.
-- The embedded Info.plist (§8) provides the usage-description strings for the prompts.
-- Milestone 1 checks this works: grant once → rebuild → reinstall → still granted when launched by launchd.
+- An **ad-hoc** signature (`codesign -s -`) changes with every build, so **macOS would ask for permissions again after each rebuild**.
+- **Plan:** sign `Briefing.app` with a **self-signed code-signing certificate**, made once in Keychain Access (Certificate Assistant → Create a Certificate → type "Code Signing"). Its designated requirement stays the same across rebuilds.
+- Milestone 1 checks this: grant once → rebuild → reinstall → still granted.
 
 ### A.7 Environment details
 
 | Concern | Handling |
 |---|---|
-| Minimal environment (no `PATH`, no shell profile) | Absolute paths everywhere; no reliance on environment variables |
-| API key | Read from the **login Keychain**. That works because the agent runs inside my user session (it's a `gui/<uid>` agent) |
-| Network not ready after wake | NetworkWaiter (A.1) |
-| Long or stuck run | Overall timeout of 3 min; on timeout, write the plain summary and exit |
-| Disk | Briefings are ~5–20 KB each; no automatic cleanup in v1 |
+| launchd environment (no `PATH`, no shell profile) | Absolute paths everywhere; no reliance on environment variables |
+| API key | Read from the **login Keychain**; works because the agent runs inside my user session (`gui/<uid>`) |
+| Idle cost | The agent is idle between triggers: no polling, ~0% CPU, a few MB of memory |
+| Disk | Briefings are ~5–20 KB each; no automatic cleanup |
 
 ### A.8 Testing
 
-- **Unit:** ScheduleGuard (weekday/weekend × before/after `runAt` × file exists), PlistBuilder (snapshot of the generated XML, run through `plutil -lint`), OutputWriter atomicity, RunLock contention. All use a fake `Clock` and a temporary directory.
-- **Integration (manual, milestone 5):** `install` → `status` → `run-now` → check that the file, notification and `state.json` appear; close the lid past a test time → wake → it runs once; reboot → log in → `RunAtLoad` catch-up; weekend login → skipped.
-- For testing, a `--label-suffix dev` option on `install` creates a second agent (`com.thakur90.briefing.dev`) at a time I choose, without touching the real one.
-
-### A.9 Moving to the app (milestone 6)
-
-The menu-bar app runs its own 7:00 scheduler, reusing **ScheduleGuard, RunLock, NetworkWaiter, BriefingPipeline, OutputWriter and RunStateStore**. Notifier is replaced with a `UserNotifications` version. On first launch, the app finds the launchd agent and offers to remove it (`briefing uninstall`). RunLock and `already-done` keep the two from both producing a briefing during the switchover.
+- **Unit:** ScheduleGuard and next-run calculation (weekday/weekend × before/after `runAt` × already done × time-zone change), PlistBuilder snapshot + `plutil -lint`, OutputWriter atomicity, RunLock queuing, CLI ↔ agent request/response. All use a fake `Clock` and a temporary directory.
+- **Manual (milestone 4):** `install` → `status` → set `runAt` 2 minutes ahead → it runs and notifies; close the lid past `runAt` → wake → runs once; reboot → login → catch-up; weekend → skipped; `kill` the agent → launchd restarts it.
+- For testing, `install --dev` installs a second copy (`com.thakur90.briefing.dev`, separate output folder) without touching the real one.
