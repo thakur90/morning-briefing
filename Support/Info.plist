@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.thakur90.briefing</string>
+	<key>CFBundleName</key>
+	<string>briefing</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Briefing reads today's events for your morning summary. It never changes your calendars.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Briefing lists reminders that are due today or overdue in your morning summary.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Briefing uses your location to show today's weather.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Briefing uses your location to show today's weather.</string>
+</dict>
+</plist>
