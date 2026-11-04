@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds Briefing.app without Xcode (design doc §2):
-#   swift build → assemble bundle → codesign → optionally install to ~/Applications.
+#   swift build → assemble bundle → codesign → optionally install to ~/Applications
+#   and (re)start the background agent.
 #
 # Usage: scripts/build-app.sh [--debug] [--install]
 # Env:   SIGN_IDENTITY  code-signing identity. Defaults to the self-signed
@@ -46,4 +47,6 @@ if $install; then
   rm -rf $dest
   cp -R $app $dest
   echo "Installed $dest"
+  # Register (or restart) the background agent with launchd.
+  $dest/Contents/MacOS/briefing install
 fi

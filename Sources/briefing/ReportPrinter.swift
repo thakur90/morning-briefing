@@ -2,35 +2,37 @@ import BriefingCore
 import Foundation
 
 enum ReportPrinter {
-    static func print(_ report: PermissionReport) {
+    static func render(_ report: PermissionReport) -> String {
+        var lines: [String] = []
         if report.calendars.isGranted {
-            Swift.print("Calendars: ✅ granted. \(report.todaysEvents.count) event(s) today")
+            lines.append("Calendars: ✅ granted. \(report.todaysEvents.count) event(s) today")
             for event in report.todaysEvents.prefix(5) {
                 let span = event.isAllDay ? "all day    " : "\(time(event.start))–\(time(event.end))"
-                Swift.print("  \(span)  \(event.title)  (\(event.calendar) · \(event.account))")
+                lines.append("  \(span)  \(event.title)  (\(event.calendar) · \(event.account))")
             }
         } else {
-            Swift.print("Calendars: ❌ \(report.calendars.rawValue)")
+            lines.append("Calendars: ❌ \(report.calendars.rawValue)")
         }
 
         if report.reminders.isGranted {
-            Swift.print("Reminders: ✅ granted. \(report.dueReminders.count) due today or overdue")
+            lines.append("Reminders: ✅ granted. \(report.dueReminders.count) due today or overdue")
             for reminder in report.dueReminders.prefix(5) {
                 let due = reminder.due.map { date($0) } ?? "no date"
-                Swift.print("  \(due)  \(reminder.title)  (\(reminder.list))")
+                lines.append("  \(due)  \(reminder.title)  (\(reminder.list))")
             }
         } else {
-            Swift.print("Reminders: ❌ \(report.reminders.rawValue)")
+            lines.append("Reminders: ❌ \(report.reminders.rawValue)")
         }
 
         switch report.location {
         case .success(let fix):
-            Swift.print(String(format: "Location:  ✅ granted. %.3f, %.3f (±%.0f m)",
+            lines.append(String(format: "Location:  ✅ granted. %.3f, %.3f (±%.0f m)",
                          fix.latitude, fix.longitude, fix.accuracyMeters))
         case .failure(let error):
-            Swift.print("Location:  ❌ \(error) (location services enabled: \(report.locationServicesEnabled))")
+            lines.append("Location:  ❌ \(error) (location services enabled: \(report.locationServicesEnabled))")
         }
 
+        return lines.joined(separator: "\n")
     }
 
     private static func time(_ date: Date) -> String {

@@ -1,6 +1,6 @@
 # Morning Briefing — Design Doc
 
-**Status:** Draft v6 · **Author:** thakur90 · **Date:** 2026-10-27
+**Status:** Draft v7 · **Author:** thakur90 · **Date:** 2026-11-04
 
 ## 1. Goal
 
@@ -138,11 +138,13 @@ When an event is added, moved or cancelled, today's briefing updates on its own.
 
 | Service | Source | Notes |
 |---|---|---|
-| Reminders | EventKit | Due today, overdue, and flagged; optionally filtered by list |
-| Location | CoreLocation, in the agent | Current location, refreshed before each briefing; the last fix is cached. If it fails, falls back to an IP-based lookup, then to a city in config |
+| Reminders | EventKit | Due today and overdue, with priority; optionally filtered by list. (EventKit doesn't expose the Reminders app's "flagged" state) |
+| Location | CoreLocation, in the agent | Current location (reverse-geocoded to e.g. "Everett, WA"), refreshed before each briefing. Fallbacks, in order: last fix if ≤ 6 h old → IP-based lookup ([ipapi.co](https://ipapi.co), city-level) → `location.fallbackCity` (Open-Meteo geocoding). `location.mode` can be `current`, `ip` or `fixed` |
 | Weather | [Open-Meteo](https://open-meteo.com) | Free, no API key. (Apple WeatherKit would need the paid developer account) |
 
 Each service returns data or an error. **If one source fails, the briefing still appears** and notes what's missing.
+
+**Free blocks** are gaps of at least `day.minFreeMinutes` (30) between timed events, inside the `day.start`–`day.end` window (08:00–18:00), starting no earlier than *now*. All-day events don't block time. **Overlaps** are timed events that overlap by at least a minute.
 
 ## 6. Summarizer (Claude API)
 
@@ -208,17 +210,19 @@ All permissions are granted to **`Briefing.app`** (bundle ID `com.thakur90.brief
 
 ## 10. Configuration
 
-`~/Library/Application Support/Briefing/config.json`, edited by hand. The agent picks up changes automatically.
+`~/Library/Application Support/Briefing/config.json`, edited by hand. The agent writes a default file on first run; missing keys fall back to defaults, so a partial file is fine. The config is read again on every run, so changes apply to the next briefing. `temperatureUnit` defaults from the Mac's region.
 
 ```json
 {
   "runAt": "07:00",
   "weekdaysOnly": true,
   "outputDir": "~/Briefings",
-  "location": { "mode": "current", "fallbackCity": "San Francisco" },
+  "temperatureUnit": "fahrenheit",
+  "day": { "start": "08:00", "end": "18:00", "minFreeMinutes": 30 },
+  "location": { "mode": "current", "fallbackCity": null },
   "calendars": {
     "providers": ["eventkit"],
-    "exclude": ["Holidays in United States"]
+    "exclude": ["Holidays in United States", "Birthdays", "Siri Suggestions"]
   },
   "reminders": { "lists": [] },
   "liveUpdates": {
@@ -249,7 +253,7 @@ pet-projects/
 │   └── briefing/                  # entry point: `agent` mode + CLI commands
 ├── Support/Info.plist             # bundle Info.plist (LSUIElement, usage descriptions)
 ├── scripts/build-app.sh           # swift build → Briefing.app → sign → ~/Applications
-├── Tests/BriefingCoreTests/
+├── Tests/BriefingCoreChecks/       # test runner: `swift run briefing-tests`
 └── docs/
     ├── design.md
     └── mockups/briefing.html      # approved layout of the briefing page
@@ -268,7 +272,9 @@ pet-projects/
 
 ## 13. Testing
 
-- Swift Testing for normalization, dedupe, the Markdown output, and decoding Claude JSON (from fixtures).
+- **Test runner:** Swift Testing and XCTest both need Xcode's test runner (with the Command Line Tools, `Testing` compiles but finds no tests, and `XCTest` is missing). So tests are a small executable target with `expect` / `expectEqual` helpers: **`swift run briefing-tests`** (exits non-zero on failure).
+- **Sample data only** in tests and fixtures. The repo is public, so nothing from real calendars, reminders or locations is committed.
+- Unit tests for dedupe, free blocks, overlaps, reminder due/overdue rules, config defaults, weather parsing, the location fallback order, the collector, the CLI ↔ agent request IDs, the launchd plist, and the dry-run text. Milestone 3 adds the HTML/Markdown output and Claude JSON decoding.
 - **Watcher:** diff cases (added / moved / cancelled / renamed / notes-only ignored / other day ignored), debounce, and the AI refresh limits.
 - **Scheduler:** next-run calculation, weekend skip, catch-up after sleep or login, time-zone change.
 - Protocol-based fakes for EventKit, location, network and the clock, so tests never touch real calendars or wait in real time.
@@ -278,9 +284,9 @@ pet-projects/
 ## 14. Milestones
 
 1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). ✅ Signed with the self-signed "Briefing Code Signing" certificate, permissions **survive a rebuild** (new CDHash, no new prompts). **Done.**
-2. **Read path:** EventKitProvider, Reminders, Location (+ IP fallback), Weather, DayContext, CLI → agent requests, `briefing today --dry-run`.
+2. **Read path:** ✅ EventKitProvider, Reminders, Location (+ fallbacks), Weather, DayContext, CLI → agent requests, `briefing today --dry-run [--json]`. `briefing install / uninstall / status` were **moved here from milestone 4**, because the dry run needs a running agent. 22 tests. **Done** (2026-11-04).
 3. **Summarizer & output:** ClaudeClient, structured output, plain-summary fallback, HTML page (matching the mockup) + Markdown, notification that opens the page.
-4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up), `briefing install / uninstall / status`.
+4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up); `status` shows the next run.
 5. **Live updates:** CalendarWatcher (listen → debounce → diff), instant schedule refresh, limited AI refresh, change notifications.
 6. **Polish:** tune the prompt using real briefings.
 
@@ -337,7 +343,7 @@ Every component sits behind a protocol, so tests can swap in fakes (clock, files
 | **AppInstaller** | Installs the app | Copies the built `Briefing.app` to `~/Applications`, signs it (A.6), and symlinks `~/.local/bin/briefing` → the executable inside it |
 | **PlistBuilder** | Generates the agent plist | Deterministic output, validated with `plutil -lint` |
 | **LaunchctlClient** | Wraps `launchctl` | `bootstrap` / `bootout` / `kickstart -k` (restart) / `print` (status), run via `Process`, with typed errors |
-| **LaunchAgentInstaller** | Puts the above together | `install`: app → plist → bootout old → bootstrap new. Safe to run again. `uninstall` reverses it and keeps briefings, logs and config |
+| **LaunchAgentInstaller** | Puts the above together | `install`: plist → bootout old → **wait until it's gone** → bootstrap new → CLI symlink. Safe to run again. (Bootstrapping before the old job has fully stopped fails with `Bootstrap failed: 5`.) `uninstall` reverses it and keeps briefings, logs and config. `scripts/build-app.sh --install` copies the app and then runs `briefing install` |
 | **Agent** | Process lifecycle | Starts the three triggers, requests permissions on first launch, reloads config when the file changes, shuts down cleanly on `SIGTERM` |
 | **MorningScheduler** | Fires the 7:00 weekday run | See A.3 |
 | **CalendarWatcher** | Fires refreshes on calendar changes | §4.3 |
@@ -428,8 +434,8 @@ Typical run: 5–20 s (mostly the Claude call). Overall timeout: 3 min, after wh
 | `briefing uninstall` | No | Stops and removes the agent and app (keeps briefings, logs, config) |
 | `briefing status` | No | Agent loaded and running? Next morning run, last runs and outcomes, AI refreshes used today, permission status (from `state.json`), and calendars found |
 | `briefing open` | No | Opens today's briefing |
-| `briefing today [--dry-run]` | Yes | Generates the briefing now (`--dry-run`: prints the DayContext only) |
-| `briefing check` | Yes | Permission check (milestone 1) |
+| `briefing today [--dry-run] [--json]` | Yes | Generates the briefing now (`--dry-run`: prints the DayContext only; `--json`: raw JSON) |
+| `briefing check [--local]` | Yes | Permission check (milestone 1). `--local` runs it in the terminal process instead (location won't work there) |
 
 ### A.6 Permissions & code signing
 

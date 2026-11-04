@@ -13,6 +13,13 @@ let package = Package(
     ],
     targets: [
         .target(name: "BriefingCore"),
+        // Swift Testing and XCTest need Xcode, which isn't installed (design doc §13),
+        // so tests are a plain executable: `swift run briefing-tests`.
+        .executableTarget(
+            name: "briefing-tests",
+            dependencies: ["BriefingCore"],
+            path: "Tests/BriefingCoreChecks"
+        ),
         .executableTarget(
             name: "briefing",
             dependencies: [
