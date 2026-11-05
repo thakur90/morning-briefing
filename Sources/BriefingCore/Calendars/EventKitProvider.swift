@@ -31,8 +31,22 @@ public struct EventKitProvider: CalendarProvider {
                 end: event.endDate,
                 isAllDay: event.isAllDay,
                 location: event.location?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                calendar: EventKitStore.ref(event.calendar)
+                calendar: EventKitStore.ref(event.calendar),
+                seriesID: event.calendarItemIdentifier,
+                occurrence: event.hasRecurrenceRules ? event.occurrenceDate : nil
             )
+        }
+    }
+
+    /// EventKit posts `EKEventStoreChanged` for any change to any calendar or reminder
+    /// list, including changes that arrive by sync from other devices.
+    public func changes() -> AsyncStream<Void> {
+        AsyncStream { continuation in
+            let token = NotificationCenter.default.addObserver(
+                forName: .EKEventStoreChanged, object: eventKit.store, queue: nil
+            ) { _ in continuation.yield() }
+            let box = ObserverToken(token)
+            continuation.onTermination = { _ in NotificationCenter.default.removeObserver(box.token) }
         }
     }
 
@@ -40,6 +54,12 @@ public struct EventKitProvider: CalendarProvider {
         let state = AccessState(EKEventStore.authorizationStatus(for: .event))
         guard state.isGranted else { throw CalendarError.accessNotGranted(state) }
     }
+}
+
+/// NotificationCenter tokens are thread-safe to remove, but aren't marked Sendable.
+private final class ObserverToken: @unchecked Sendable {
+    let token: NSObjectProtocol
+    init(_ token: NSObjectProtocol) { self.token = token }
 }
 
 extension String {

@@ -1,7 +1,7 @@
 import Foundation
 
 public struct EventNote: Codable, Sendable, Equatable {
-    public enum Kind: String, Codable, Sendable { case first, backToBack, overlap, added, moved }
+    public enum Kind: String, Codable, Sendable { case first, backToBack, overlap, added, moved, renamed, updated }
     public var kind: Kind
     public var text: String
 
@@ -23,8 +23,12 @@ public struct Briefing: Codable, Sendable, Equatable {
     public var notificationBody: String
     /// When the morning briefing was first generated (stays fixed across live updates).
     public var generatedAt: Date
-    /// Set when a live update (milestone 5) rebuilt the briefing.
+    /// Set when a live update rebuilt the briefing.
     public var updatedAt: Date?
+    /// Today's events as of the morning briefing: what "Changes since this morning" compares against.
+    public var baseline: [Event]?
+    /// Changes since `baseline` (design doc §4.3).
+    public var changes: [EventChange]?
 
     public init(
         context: DayContext, headline: String, sentences: [String], notes: [String: [EventNote]],

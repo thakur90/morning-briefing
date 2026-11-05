@@ -36,6 +36,12 @@ public struct OutputWriter: Sendable {
         return files
     }
 
+    /// The saved briefing for `date` (from its .context.json), if any.
+    public func loadBriefing(for date: String) -> Briefing? {
+        guard let data = try? Data(contentsOf: files(for: date).context) else { return nil }
+        return try? JSONDecoder.briefing.decode(Briefing.self, from: data)
+    }
+
     /// Today's briefing page, if it has been generated.
     public func existingPage(for date: String) -> URL? {
         let url = files(for: date).html

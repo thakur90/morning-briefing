@@ -16,7 +16,12 @@ public struct MarkdownRenderer: Sendable {
         lines.append("# \(briefing.headline)")
         var stamp = "\(date) · Generated \(text.time(briefing.generatedAt))"
         if let updated = briefing.updatedAt { stamp += " · Updated \(text.time(updated))" }
-        lines += ["", "_\(stamp)_", "", "## Your day", "", briefing.sentences.joined(separator: " ")]
+        lines += ["", "_\(stamp)_"]
+        if let changes = briefing.changes, !changes.isEmpty {
+            let wording = ChangeText(calendar: text.calendar, locale: text.locale)
+            lines += ["", "## Changes since this morning", ""] + changes.map { "- \(wording.line($0))" }
+        }
+        lines += ["", "## Your day", "", briefing.sentences.joined(separator: " ")]
 
         if let weather = context.weather {
             let place = context.location?.name.map { " · \($0)" } ?? ""

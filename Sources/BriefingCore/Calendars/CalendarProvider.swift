@@ -1,11 +1,12 @@
 import Foundation
 
-/// A source of calendar events (design doc §4.2). Live-update support
-/// (`changes()`) is added in milestone 5.
+/// A source of calendar events (design doc §4.2).
 public protocol CalendarProvider: Sendable {
     var id: String { get }
     func calendars() async throws -> [CalendarInfo]
     func events(in range: DateInterval) async throws -> [Event]
+    /// Emits when the provider's data *may* have changed. Coarse: callers re-fetch and diff.
+    func changes() -> AsyncStream<Void>
 }
 
 public enum CalendarError: Error, CustomStringConvertible {

@@ -55,13 +55,16 @@ struct Agent: AsyncParsableCommand {
         Notifier.shared.activate()
         let pipeline = BriefingPipeline(paths: paths, eventKit: eventKit, state: state, log: { log($0) })
         let scheduler = MorningScheduler(pipeline: pipeline, paths: paths, log: { log($0) })
+        let watcher = CalendarWatcher(changes: EventKitProvider(eventKit: eventKit).changes(), pipeline: pipeline, log: { log($0) })
         let token = AgentChannel.listen(paths: paths) { request in
             log("request \(request.command.rawValue) \(request.id)")
             return await Self.handle(request, pipeline: pipeline, eventKit: eventKit, paths: paths)
         }
         scheduler.start()
-        log("listening for requests")
+        watcher.start()
+        log("listening for requests and calendar changes")
         defer {
+            watcher.stop()
             scheduler.stop()
             DistributedNotificationCenter.default().removeObserver(token)
         }

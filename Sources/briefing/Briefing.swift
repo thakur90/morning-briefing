@@ -6,7 +6,7 @@ struct Briefing: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "briefing",
         abstract: "Your morning briefing: calendars, reminders and weather.",
-        version: "0.4.0",
+        version: "0.5.0",
         subcommands: [Today.self, Open.self, Status.self, Install.self, Uninstall.self, Check.self, Agent.self]
     )
 }

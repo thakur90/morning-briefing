@@ -35,10 +35,20 @@ public struct Event: Codable, Sendable, Equatable, Identifiable {
     public var calendar: CalendarRef
     /// Other calendars the same event was found in (after de-duplication).
     public var alsoIn: [CalendarRef]
+    /// Stable across edits (EventKit's calendarItemIdentifier). Used to match events between snapshots.
+    public var seriesID: String?
+    /// For recurring events: the original date of this occurrence, which also stays fixed when it's moved.
+    public var occurrence: Date?
+
+    /// Identifies "the same event" before and after an edit (live updates, §4.3).
+    public var matchKey: String {
+        (seriesID ?? id) + (occurrence.map { "@\(Int($0.timeIntervalSince1970))" } ?? "")
+    }
 
     public init(
         id: String, title: String, start: Date, end: Date, isAllDay: Bool = false,
-        location: String? = nil, calendar: CalendarRef, alsoIn: [CalendarRef] = []
+        location: String? = nil, calendar: CalendarRef, alsoIn: [CalendarRef] = [],
+        seriesID: String? = nil, occurrence: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -48,6 +58,8 @@ public struct Event: Codable, Sendable, Equatable, Identifiable {
         self.location = location
         self.calendar = calendar
         self.alsoIn = alsoIn
+        self.seriesID = seriesID
+        self.occurrence = occurrence
     }
 }
 

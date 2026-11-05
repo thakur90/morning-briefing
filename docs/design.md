@@ -124,10 +124,11 @@ When an event is added, moved or cancelled, today's briefing updates on its own.
 
 1. **Listen:** EventKit posts `EKEventStoreChanged` whenever anything in any calendar or reminder list changes, including changes that arrive by sync.
 2. **Debounce (10 s):** a sync usually fires several notifications in a row. The watcher waits until things settle.
-3. **Re-fetch and diff:** read the rest of today's events and compare them with the last snapshot. Events are matched by their EventKit identifier and compared on start/end time, title, location and calendar. The result is `added` / `moved` / `cancelled` / `renamed`. Changes outside today, or edits only to notes, are ignored.
+3. **Re-fetch and diff:** read today's events and compare them with the saved briefing (`.context.json`). Events are matched by EventKit's `calendarItemIdentifier`, plus the original occurrence date for recurring events, so a moved event stays "the same" event. They're compared on start/end time, title, location and calendar. The result is `added` / `moved` / `renamed` / `updated` (location or calendar) / `cancelled`. Changes on other days, changes that only affect events that have already ended, and notes-only edits are ignored.
 4. **Refresh:**
    - **The whole briefing is rebuilt**: schedule, headline, notes, free time. It's just local rules, so it's instant and there's no need to rate-limit it.
-5. **Save and notify:** rewrite today's briefing atomically with an "Updated 2:14 PM" stamp and a **"Changes since this morning"** section. Then send a notification: *"New: Dentist at 3:00 PM (Home)"*, *"Moved: 1:1 with Priya → 4:30 PM"*, *"Cancelled: Team lunch"*. Several changes together are grouped into one notification.
+5. **Save and notify:** the page compares against the **morning briefing's events** (the baseline, carried forward by every later run), while the notification only lists what changed since the previous refresh. Location and weather are reused for up to an hour instead of being fetched again on every change.
+   Then: rewrite today's briefing atomically with an "Updated 2:14 PM" stamp and a **"Changes since this morning"** section. Then send a notification: *"New: Dentist at 3:00 PM (Home)"*, *"Moved: 1:1 with Priya → 4:30 PM"*, *"Cancelled: Team lunch"*. Several changes together are grouped into one notification.
 
 **Rules:**
 - It only updates **today's existing briefing.** Before the 7:00 run or on weekends, changes just update the snapshot and are picked up by the next run.
@@ -318,7 +319,7 @@ pet-projects/
 2. **Read path:** ✅ EventKitProvider, Reminders, Location (+ fallbacks), Weather, DayContext, CLI → agent requests, `briefing today --dry-run [--json]`. `briefing install / uninstall / status` were **moved here from milestone 4**, because the dry run needs a running agent. 22 tests. **Done** (2026-11-04).
 3. **Summary & output:** ✅ SummaryBuilder rules (§6), HTML page (mockup styling) + Markdown + context JSON, notification that opens the page, `briefing today [--open] [--no-notify]`, `briefing open`. 37 tests. **Done** (2026-11-05).
 4. **Morning schedule:** ✅ MorningScheduler (7:00 weekdays, catch-up), run history kept across restarts, `status` shows the schedule and last runs. Verified on the Mac: the timer fired on time, and a restart afterwards skipped with `already-done`. 45 tests. **Done** (2026-11-05).
-5. **Live updates:** CalendarWatcher (listen → debounce → diff), full rebuild on change, change notifications.
+5. **Live updates:** ✅ CalendarWatcher (listen → debounce → diff), full rebuild on change, "Calendar updated" notifications, "Changes since this morning" on the page. Verified on the Mac: an event added in Calendar refreshed the briefing and notified within seconds. 55 tests. **Done** (2026-11-05).
 6. **Polish:** tune the summary rules and thresholds using a few weeks of real briefings.
 
 ## 15. Decisions log

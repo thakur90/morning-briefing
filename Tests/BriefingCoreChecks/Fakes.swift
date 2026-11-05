@@ -32,6 +32,7 @@ struct FakeCalendars: CalendarProvider {
     func events(in range: DateInterval) async throws -> [Event] {
         events.filter { $0.end > range.start && $0.start < range.end }
     }
+    func changes() -> AsyncStream<Void> { AsyncStream { $0.finish() } }
 }
 
 struct FakeReminders: ReminderSource {

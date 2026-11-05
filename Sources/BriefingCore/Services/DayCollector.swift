@@ -33,10 +33,15 @@ public struct DayCollector: Sendable {
             weather: WeatherService(http: http, unit: config.temperatureUnit))
     }
 
-    public func collect(now: Date = .now) async -> DayContext {
+    /// Weather and location from `previous` are reused if it's this recent.
+    public static let weatherReuseWindow: TimeInterval = 3600
+
+    /// - Parameter previous: an earlier context from today; its location and weather are
+    ///   reused if they're less than an hour old (live updates don't need a new fix each time).
+    public func collect(now: Date = .now, reusingWeatherFrom previous: DayContext? = nil) async -> DayContext {
         async let calendarResult = collectEvents(now: now)
         async let reminderResult = collectReminders(now: now)
-        async let weatherResult = collectLocationAndWeather(now: now)
+        async let weatherResult = locationAndWeather(reusing: previous, now: now)
 
         let (events, eventStatus) = await calendarResult
         let (dueReminders, reminderStatus) = await reminderResult
@@ -104,6 +109,20 @@ public struct DayCollector: Sendable {
         } catch {
             return ([], .failed("reminders", "\(error)"))
         }
+    }
+
+    private func locationAndWeather(reusing previous: DayContext?, now: Date) async -> (LocationInfo?, WeatherForecast?, [SourceStatus]) {
+        if let reused = reusableWeather(previous, now: now) { return reused }
+        return await collectLocationAndWeather(now: now)
+    }
+
+    private func reusableWeather(_ previous: DayContext?, now: Date) -> (LocationInfo?, WeatherForecast?, [SourceStatus])? {
+        guard let previous, let weather = previous.weather, let location = previous.location,
+              now.timeIntervalSince(previous.generatedAt) < Self.weatherReuseWindow,
+              now.timeIntervalSince(previous.generatedAt) >= 0
+        else { return nil }
+        let statuses = previous.sources.filter { $0.name == "location" || $0.name == "weather" }
+        return (location, weather, statuses)
     }
 
     private func collectLocationAndWeather(now: Date) async -> (LocationInfo?, WeatherForecast?, [SourceStatus]) {

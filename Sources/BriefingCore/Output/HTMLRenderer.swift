@@ -4,15 +4,18 @@ import Foundation
 /// One self-contained file: inline CSS, no JavaScript, no external requests.
 public struct HTMLRenderer: Sendable {
     private let text: TimeText
+    private let changeText: ChangeText
 
     public init(calendar: Calendar = .current, locale: Locale = .current) {
         self.text = TimeText(calendar: calendar, locale: locale)
+        self.changeText = ChangeText(calendar: calendar, locale: locale)
     }
 
     public func render(_ briefing: Briefing) -> String {
         let context = briefing.context
         var body = ""
         body += header(briefing)
+        if let changes = briefing.changes, !changes.isEmpty { body += changesSection(changes) }
         body += section("summary", "Your day", "<p>\(esc(briefing.sentences.joined(separator: " ")))</p>")
         if let weather = context.weather { body += weatherSection(weather, location: context.location) }
         body += scheduleSection(briefing)
@@ -54,6 +57,30 @@ public struct HTMLRenderer: Sendable {
         """
     }
 
+    private func changesSection(_ changes: [EventChange]) -> String {
+        let items = changes.map { change -> String in
+            let (cls, label): (String, String) = switch change.kind {
+            case .added: ("new", "New")
+            case .moved: ("moved", "Moved")
+            case .renamed: ("moved", "Renamed")
+            case .updated: ("moved", "Updated")
+            case .cancelled: ("cancelled", "Cancelled")
+            }
+            let line = changeText.line(change)
+            let detail = line.firstIndex(of: ":").map { String(line[line.index($0, offsetBy: 2)...]) } ?? line
+            return "      <li><span class=\"tag \(cls)\">\(label)</span>\(esc(detail))</li>"
+        }
+        return """
+          <section class="changes" id="changes">
+            <h2>Changes since this morning</h2>
+            <ul>
+        \(items.joined(separator: "\n"))
+            </ul>
+          </section>
+
+        """
+    }
+
     private func weatherSection(_ weather: WeatherForecast, location: LocationInfo?) -> String {
         let place = location?.name.map { " · \($0)" } ?? ""
         let hours = weather.hourly.enumerated()
@@ -73,12 +100,14 @@ public struct HTMLRenderer: Sendable {
 
     private func scheduleSection(_ briefing: Briefing) -> String {
         let context = briefing.context
-        enum Row { case event(Event), free(FreeBlock) }
-        let rows: [Row] = (context.events.map(Row.event) + context.freeBlocks.map(Row.free)).sorted { a, b in
+        enum Row { case event(Event), free(FreeBlock), cancelled(EventChange) }
+        let cancelled = (briefing.changes ?? []).filter { $0.kind == .cancelled && $0.before != nil }
+        let rows: [Row] = (context.events.map(Row.event) + context.freeBlocks.map(Row.free) + cancelled.map(Row.cancelled)).sorted { a, b in
             func key(_ row: Row) -> (Int, Date) {
                 switch row {
                 case .event(let e): (e.isAllDay ? 0 : 1, e.start)
                 case .free(let f): (1, f.start)
+                case .cancelled(let c): (c.before!.isAllDay ? 0 : 1, c.before!.start)
                 }
             }
             return key(a) < key(b)
@@ -100,6 +129,15 @@ public struct HTMLRenderer: Sendable {
                     <div class="event">
                       <div class="time">\(esc(time))</div>
                       <div><div class="title">\(dot)\(esc(event.title))</div><div class="meta">\(esc(meta))</div>\(notes)</div>
+                    </div>
+                """
+            case .cancelled(let change):
+                let event = change.before!
+                let time = event.isAllDay ? "All day" : text.range(event.start, event.end)
+                return """
+                    <div class="event cancelled">
+                      <div class="time">\(esc(time))</div>
+                      <div><div class="title">\(esc(event.title))</div><div class="meta">\(esc(changeText.cancelledMeta(change)))</div></div>
                     </div>
                 """
             case .free(let block):
