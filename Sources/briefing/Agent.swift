@@ -28,15 +28,17 @@ struct Agent: AsyncParsableCommand {
         case .failure(.notAuthorized(let state)): state
         case .failure: .granted  // authorized, but no fix this time
         }
-        try? AgentState(
-            pid: getpid(), version: version, startedAt: .now,
-            permissions: [
-                "calendars": report.calendars.rawValue,
-                "reminders": report.reminders.rawValue,
-                "location": locationState.rawValue,
-                "notifications": notifications.rawValue,
-            ]
-        ).save(paths: paths)
+        let permissions = [
+            "calendars": report.calendars.rawValue,
+            "reminders": report.reminders.rawValue,
+            "location": locationState.rawValue,
+            "notifications": notifications.rawValue,
+        ]
+        // Keep the run history from before this start (e.g. today's morning run).
+        let state = AgentState(
+            pid: getpid(), version: version, startedAt: .now, permissions: permissions,
+            lastRuns: AgentState.load(paths: paths)?.lastRuns)
+        try? state.save(paths: paths)
 
         if once {
             if notifications.isGranted {
@@ -51,40 +53,34 @@ struct Agent: AsyncParsableCommand {
         // was granted doesn't see any data.
         let eventKit = EventKitStore()
         Notifier.shared.activate()
+        let pipeline = BriefingPipeline(paths: paths, eventKit: eventKit, state: state, log: { log($0) })
+        let scheduler = MorningScheduler(pipeline: pipeline, paths: paths, log: { log($0) })
         let token = AgentChannel.listen(paths: paths) { request in
             log("request \(request.command.rawValue) \(request.id)")
-            return await Self.handle(request, eventKit: eventKit, paths: paths)
+            return await Self.handle(request, pipeline: pipeline, eventKit: eventKit, paths: paths)
         }
+        scheduler.start()
         log("listening for requests")
-        defer { DistributedNotificationCenter.default().removeObserver(token) }
+        defer {
+            scheduler.stop()
+            DistributedNotificationCenter.default().removeObserver(token)
+        }
         while true { try await Task.sleep(for: .seconds(3600)) }
     }
 
     @MainActor
-    private static func handle(_ request: AgentRequest, eventKit: EventKitStore, paths: AppPaths) async -> AgentResponse {
+    private static func handle(
+        _ request: AgentRequest, pipeline: BriefingPipeline, eventKit: EventKitStore, paths: AppPaths
+    ) async -> AgentResponse {
         switch request.command {
         case .today:
-            do {
-                let config = try Config.loadOrCreate(paths: paths)
-                let context = await DayCollector.live(config: config, paths: paths, eventKit: eventKit).collect()
-                let briefing = SummaryBuilder(config: config.summary).build(context)
-                let files = try OutputWriter(config: config, paths: paths).write(
-                    briefing, html: HTMLRenderer().render(briefing), markdown: MarkdownRenderer().render(briefing))
-                var output = briefing.headline
-                if request.notify != false {
-                    do {
-                        try await Notifier.shared.post(
-                            title: briefing.notificationTitle, body: briefing.notificationBody,
-                            opening: files.html, thread: "briefing-\(context.date)")
-                    } catch {
-                        output += "\n(notification not sent: \(error.localizedDescription))"
-                    }
-                }
-                log("briefing written: \(files.html.path)")
-                return AgentResponse(id: request.id, ok: true, files: files, output: output)
-            } catch {
-                return AgentResponse(id: request.id, ok: false, error: "\(error)")
+            let result = await pipeline.run(.manual, notify: request.notify != false)
+            guard let files = result.files, let briefing = result.briefing else {
+                return AgentResponse(id: request.id, ok: false, error: result.record.error ?? "the briefing wasn't written")
             }
+            let failed = result.record.failedSources
+            let output = briefing.headline + (failed.isEmpty ? "" : "\n(unavailable: \(failed.joined(separator: ", ")))")
+            return AgentResponse(id: request.id, ok: true, files: files, output: output)
         case .todayDryRun:
             do {
                 let config = try Config.loadOrCreate(paths: paths)

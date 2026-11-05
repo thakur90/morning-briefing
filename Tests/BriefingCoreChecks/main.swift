@@ -249,5 +249,6 @@ await Harness.test("text renderer shows each section") {
 }
 
 await runSummaryTests()
+await runScheduleTests()
 
 Harness.finish()

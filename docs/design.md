@@ -317,7 +317,7 @@ pet-projects/
 1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). ✅ Signed with the self-signed "Briefing Code Signing" certificate, permissions **survive a rebuild** (new CDHash, no new prompts). **Done.**
 2. **Read path:** ✅ EventKitProvider, Reminders, Location (+ fallbacks), Weather, DayContext, CLI → agent requests, `briefing today --dry-run [--json]`. `briefing install / uninstall / status` were **moved here from milestone 4**, because the dry run needs a running agent. 22 tests. **Done** (2026-11-04).
 3. **Summary & output:** ✅ SummaryBuilder rules (§6), HTML page (mockup styling) + Markdown + context JSON, notification that opens the page, `briefing today [--open] [--no-notify]`, `briefing open`. 37 tests. **Done** (2026-11-05).
-4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up); `status` shows the next run.
+4. **Morning schedule:** ✅ MorningScheduler (7:00 weekdays, catch-up), run history kept across restarts, `status` shows the schedule and last runs. Verified on the Mac: the timer fired on time, and a restart afterwards skipped with `already-done`. 45 tests. **Done** (2026-11-05).
 5. **Live updates:** CalendarWatcher (listen → debounce → diff), full rebuild on change, change notifications.
 6. **Polish:** tune the summary rules and thresholds using a few weeks of real briefings.
 
@@ -382,13 +382,13 @@ Every component sits behind a protocol, so tests can swap in fakes (clock, files
 | **CalendarWatcher** | Fires refreshes on calendar changes | §4.3 |
 | **CommandListener** | Handles CLI requests | §3.2. Fixed set of commands: `today`, `today --dry-run`, `check` |
 | **RunCoordinator** | Runs one briefing generation | Steps in A.4. Each trigger says what kind of run it wants: `morning`, `refresh(changes)`, or `manual` |
-| **ScheduleGuard** | Decides whether a morning run should happen | Rules in A.3. Uses an injected `Clock` and `Calendar` |
-| **RunLock** | One generation at a time | An in-process actor, plus `flock` on `run.lock` in case a second agent instance ever starts |
+| **ScheduleGuard** | Decides whether a morning run should happen | Rules in A.3. Pure: takes `now`, the last morning day and a `Calendar` |
+| **RunLock** | One generation at a time | Inside `BriefingPipeline`: runs requested during a run wait their turn (FIFO). No `flock`: launchd runs one instance per label, and the morning check is repeated after waiting, so it can't run twice |
 | **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`, up to 120 s. If it times out, the briefing is built without weather |
 | **BriefingPipeline** | The actual work (§4–§6) | Collect → DayContext → SummaryBuilder → `Briefing` |
 | **OutputWriter** | Saves the results | `.md`, `.html` and `.context.json`, written **atomically** (temp file + rename) |
 | **Notifier** | Notifications | `UserNotifications`, one thread per day. The page's file URL travels in the notification; a click opens it via `NSWorkspace`. If the agent isn't running when a notification is clicked, macOS launches the app with no arguments, and it opens today's page instead of printing usage. Several changes are grouped into one notification |
-| **RunStateStore** | Records what happened | `state.json`: last run per kind, outcome (`full` / `partial` (some sources failed) / `skipped:<reason>` / `failed`), failed sources. Read by `briefing status` |
+| **RunStateStore** | Records what happened | `state.json` (`AgentState`): permissions, and the last run per kind (`morning` / `manual` / `refresh`) with outcome (`full` / `partial` = some sources failed / `failed`) and failed sources. **Kept across agent restarts**, so a restart after 7:00 doesn't repeat the morning run. Read by `briefing status` |
 | **Log** | Diagnostics | `os.Logger` (subsystem `com.thakur90.briefing`) plus a rotating file at `~/Library/Logs/Briefing/briefing.log` (1 MB × 3) |
 
 ### A.2 Agent plist
@@ -426,13 +426,15 @@ The scheduler works out the next run time (next weekday at `runAt`, in **local t
 | Agent starts (login, or restart after a crash) | Catch-up check |
 | Mac wakes (`NSWorkspace.didWakeNotification`) | Catch-up check (a timer doesn't fire during sleep) |
 | Clock or time zone changes (`NSSystemClockDidChange`, `NSSystemTimeZoneDidChange`) | Recalculate the next run |
-| `runAt` / `weekdaysOnly` changed in config | Recalculate the next run |
+| `runAt` / `weekdaysOnly` changed in config | Picked up within a minute: the scheduler sleeps at most 60 s between checks and reloads the config each time (the check is cheap; nothing runs unless it's due) |
 
 **Catch-up check = ScheduleGuard** (checked in order; the first match skips the run):
 1. Today isn't a run day → `skipped:not-a-run-day`
 2. It's before `runAt` → `skipped:too-early` (the timer will handle it)
-3. Today's morning briefing already exists → `skipped:already-done`
+3. Today's morning run already wrote a briefing (from `state.json`; a manual `briefing today` doesn't count) → `skipped:already-done`
 4. Otherwise → **run now**
+
+If a morning run fails (nothing written), it's retried after 15 minutes. A catch-up runs at any time of day: waking the Mac at 9 PM on a weekday still produces that day's briefing.
 
 | Situation at 7:00 | Result |
 |---|---|
@@ -464,7 +466,7 @@ Typical run: ~1–3 s (mostly the location fix and the weather request). Overall
 |---|---|---|
 | `briefing install` | No | Installs the app and agent, then starts it. The agent asks for all permissions on its first launch |
 | `briefing uninstall` | No | Stops and removes the agent and app (keeps briefings, logs, config) |
-| `briefing status` | No | Agent loaded and running? Next morning run, last runs and outcomes, permission status (from `state.json`), and calendars found |
+| `briefing status` | No | Agent running? App, permissions, schedule ("07:00 Mon–Fri · next: Fri, Nov 6 at 7:00 AM", or "due now"), last morning/manual/refresh runs with outcomes, config and log paths |
 | `briefing open` | No | Opens today's briefing |
 | `briefing today [--dry-run] [--json]` | Yes | Generates the briefing now (`--dry-run`: prints the DayContext only; `--json`: raw JSON) |
 | `briefing check [--local]` | Yes | Permission check (milestone 1). `--local` runs it in the terminal process instead (location won't work there) |

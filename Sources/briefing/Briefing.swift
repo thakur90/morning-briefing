@@ -6,7 +6,7 @@ struct Briefing: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "briefing",
         abstract: "Your morning briefing: calendars, reminders and weather.",
-        version: "0.3.0",
+        version: "0.4.0",
         subcommands: [Today.self, Open.self, Status.self, Install.self, Uninstall.self, Check.self, Agent.self]
     )
 }
@@ -107,6 +107,26 @@ struct Status: ParsableCommand {
             let permissions = ["calendars", "reminders", "location", "notifications"]
                 .map { "\($0) \(state.permissions[$0] == AccessState.granted.rawValue ? "✅" : "❌ \(state.permissions[$0] ?? "unknown")")" }
             print("Permissions:  \(permissions.joined(separator: "  "))")
+        }
+        if let config = try? Config.loadOrCreate(paths: paths) {
+            let schedule = ScheduleGuard(config: config, calendar: .autoupdatingCurrent)
+            let days = config.weekdaysOnly ? "Mon–Fri" : "every day"
+            var line = "\(config.runAt) \(days)"
+            let lastMorningDay = AgentState.load(paths: paths)?.lastMorningDay
+            if (try? schedule.decide(now: .now, lastMorningDay: lastMorningDay)) == .run {
+                line += " · today's run is due now"
+            } else if let next = try? schedule.nextRun(after: .now) {
+                line += " · next: \(next.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()))"
+            }
+            print("Schedule:     \(line)")
+        }
+        if let runs = AgentState.load(paths: paths)?.lastRuns, !runs.isEmpty {
+            for kind in [RunKind.morning, .manual, .refresh] {
+                guard let run = runs[kind.rawValue] else { continue }
+                let failed = run.failedSources.isEmpty ? "" : " (unavailable: \(run.failedSources.joined(separator: ", ")))"
+                let label = "Last \(kind.rawValue):".padding(toLength: 14, withPad: " ", startingAt: 0)
+                print("\(label)\(run.finishedAt.formatted(date: .abbreviated, time: .shortened)) · \(run.outcome.rawValue)\(failed)\(run.error.map { " · \($0)" } ?? "")")
+            }
         }
         print("Config:       \(paths.config.path)")
         print("Logs:         \(paths.logsDir.path)")
