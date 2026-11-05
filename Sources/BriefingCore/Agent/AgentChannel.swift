@@ -1,6 +1,7 @@
 import Foundation
 
 public enum AgentCommand: String, Codable, Sendable {
+    case today
     case todayDryRun = "today-dry-run"
     case check
 }
@@ -8,10 +9,13 @@ public enum AgentCommand: String, Codable, Sendable {
 public struct AgentRequest: Codable, Sendable, Equatable {
     public var id: String
     public var command: AgentCommand
+    /// `today` only: post a notification (default true).
+    public var notify: Bool?
 
-    public init(id: String = UUID().uuidString, command: AgentCommand) {
+    public init(id: String = UUID().uuidString, command: AgentCommand, notify: Bool? = nil) {
         self.id = id
         self.command = command
+        self.notify = notify
     }
 }
 
@@ -19,13 +23,18 @@ public struct AgentResponse: Codable, Sendable {
     public var id: String
     public var ok: Bool
     public var context: DayContext?
+    public var files: BriefingFiles?
     public var output: String?
     public var error: String?
 
-    public init(id: String, ok: Bool, context: DayContext? = nil, output: String? = nil, error: String? = nil) {
+    public init(
+        id: String, ok: Bool, context: DayContext? = nil, files: BriefingFiles? = nil,
+        output: String? = nil, error: String? = nil
+    ) {
         self.id = id
         self.ok = ok
         self.context = context
+        self.files = files
         self.output = output
         self.error = error
     }
@@ -51,8 +60,10 @@ public enum AgentChannel {
 
     // MARK: CLI side
 
-    public static func send(_ command: AgentCommand, paths: AppPaths = AppPaths(), timeout: TimeInterval = 90) async throws -> AgentResponse {
-        let request = AgentRequest(command: command)
+    public static func send(
+        _ command: AgentCommand, notify: Bool? = nil, paths: AppPaths = AppPaths(), timeout: TimeInterval = 90
+    ) async throws -> AgentResponse {
+        let request = AgentRequest(command: command, notify: notify)
         try FileManager.default.createDirectory(at: paths.responsesDir, withIntermediateDirectories: true)
         let responseURL = paths.responsesDir.appending(path: "\(request.id).json")
         defer { try? FileManager.default.removeItem(at: responseURL) }

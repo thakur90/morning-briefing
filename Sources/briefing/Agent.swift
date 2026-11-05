@@ -50,6 +50,7 @@ struct Agent: AsyncParsableCommand {
         // Created after the permission prompts: an EKEventStore made before access
         // was granted doesn't see any data.
         let eventKit = EventKitStore()
+        Notifier.shared.activate()
         let token = AgentChannel.listen(paths: paths) { request in
             log("request \(request.command.rawValue) \(request.id)")
             return await Self.handle(request, eventKit: eventKit, paths: paths)
@@ -62,6 +63,28 @@ struct Agent: AsyncParsableCommand {
     @MainActor
     private static func handle(_ request: AgentRequest, eventKit: EventKitStore, paths: AppPaths) async -> AgentResponse {
         switch request.command {
+        case .today:
+            do {
+                let config = try Config.loadOrCreate(paths: paths)
+                let context = await DayCollector.live(config: config, paths: paths, eventKit: eventKit).collect()
+                let briefing = SummaryBuilder(config: config.summary).build(context)
+                let files = try OutputWriter(config: config, paths: paths).write(
+                    briefing, html: HTMLRenderer().render(briefing), markdown: MarkdownRenderer().render(briefing))
+                var output = briefing.headline
+                if request.notify != false {
+                    do {
+                        try await Notifier.shared.post(
+                            title: briefing.notificationTitle, body: briefing.notificationBody,
+                            opening: files.html, thread: "briefing-\(context.date)")
+                    } catch {
+                        output += "\n(notification not sent: \(error.localizedDescription))"
+                    }
+                }
+                log("briefing written: \(files.html.path)")
+                return AgentResponse(id: request.id, ok: true, files: files, output: output)
+            } catch {
+                return AgentResponse(id: request.id, ok: false, error: "\(error)")
+            }
         case .todayDryRun:
             do {
                 let config = try Config.loadOrCreate(paths: paths)

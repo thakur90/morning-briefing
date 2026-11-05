@@ -2,13 +2,12 @@ import ArgumentParser
 import BriefingCore
 import Foundation
 
-@main
 struct Briefing: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "briefing",
         abstract: "Your morning briefing: calendars, reminders and weather.",
-        version: "0.2.0",
-        subcommands: [Today.self, Status.self, Install.self, Uninstall.self, Check.self, Agent.self]
+        version: "0.3.0",
+        subcommands: [Today.self, Open.self, Status.self, Install.self, Uninstall.self, Check.self, Agent.self]
     )
 }
 
@@ -25,29 +24,68 @@ func requireRunningAgent() throws {
 
 struct Today: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Show today's briefing data (collected by the background agent).")
+        abstract: "Generate today's briefing now (via the background agent).")
 
-    @Flag(help: "Collect and print today's data without summarizing (the only mode until milestone 3).")
+    @Flag(help: "Only collect and print today's data; don't write the briefing or notify.")
     var dryRun = false
 
-    @Flag(help: "Print the raw DayContext JSON.")
+    @Flag(help: "With --dry-run: print the raw DayContext JSON.")
     var json = false
 
+    @Flag(help: "Don't post a notification.")
+    var noNotify = false
+
+    @Flag(help: "Open the briefing page when it's ready.")
+    var open = false
+
     func run() async throws {
-        guard dryRun else {
-            throw ValidationError("AI summaries arrive in milestone 3. For now, use: briefing today --dry-run")
-        }
         try requireRunningAgent()
-        let response = try await AgentChannel.send(.todayDryRun)
-        guard response.ok, let context = response.context else {
-            throw ValidationError(response.error ?? "The agent returned no data.")
+        if dryRun {
+            let response = try await AgentChannel.send(.todayDryRun)
+            guard response.ok, let context = response.context else {
+                throw ValidationError(response.error ?? "The agent returned no data.")
+            }
+            print(json
+                ? String(decoding: try JSONEncoder.briefing.encode(context), as: UTF8.self)
+                : DayContextTextRenderer.render(context))
+            return
         }
-        if json {
-            print(String(decoding: try JSONEncoder.briefing.encode(context), as: UTF8.self))
-        } else {
-            print(DayContextTextRenderer.render(context))
+        let response = try await AgentChannel.send(.today, notify: !noNotify)
+        guard response.ok, let files = response.files else {
+            throw ValidationError(response.error ?? "The agent didn't write a briefing.")
         }
+        print(response.output ?? "")
+        print("Page:     \(files.html.path)")
+        print("Markdown: \(files.markdown.path)")
+        if open { openFile(files.html) }
     }
+}
+
+struct Open: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Open today's briefing page.")
+
+    func run() throws {
+        guard let page = todaysPage() else {
+            throw ValidationError("No briefing for today yet. Generate one with: briefing today")
+        }
+        openFile(page)
+    }
+}
+
+func todaysPage(paths: AppPaths = AppPaths()) -> URL? {
+    guard let config = try? Config.loadOrCreate(paths: paths) else { return nil }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd"
+    return OutputWriter(config: config, paths: paths).existingPage(for: formatter.string(from: .now))
+}
+
+func openFile(_ url: URL) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    process.arguments = [url.path]
+    try? process.run()
+    process.waitUntilExit()
 }
 
 struct Status: ParsableCommand {

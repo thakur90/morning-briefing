@@ -316,7 +316,7 @@ pet-projects/
 
 1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). ✅ Signed with the self-signed "Briefing Code Signing" certificate, permissions **survive a rebuild** (new CDHash, no new prompts). **Done.**
 2. **Read path:** ✅ EventKitProvider, Reminders, Location (+ fallbacks), Weather, DayContext, CLI → agent requests, `briefing today --dry-run [--json]`. `briefing install / uninstall / status` were **moved here from milestone 4**, because the dry run needs a running agent. 22 tests. **Done** (2026-11-04).
-3. **Summary & output:** SummaryBuilder rules (§6), HTML page (matching the mockup) + Markdown, notification that opens the page, `briefing today`.
+3. **Summary & output:** ✅ SummaryBuilder rules (§6), HTML page (mockup styling) + Markdown + context JSON, notification that opens the page, `briefing today [--open] [--no-notify]`, `briefing open`. 37 tests. **Done** (2026-11-05).
 4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up); `status` shows the next run.
 5. **Live updates:** CalendarWatcher (listen → debounce → diff), full rebuild on change, change notifications.
 6. **Polish:** tune the summary rules and thresholds using a few weeks of real briefings.
@@ -387,7 +387,7 @@ Every component sits behind a protocol, so tests can swap in fakes (clock, files
 | **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`, up to 120 s. If it times out, the briefing is built without weather |
 | **BriefingPipeline** | The actual work (§4–§6) | Collect → DayContext → SummaryBuilder → `Briefing` |
 | **OutputWriter** | Saves the results | `.md`, `.html` and `.context.json`, written **atomically** (temp file + rename) |
-| **Notifier** | Notifications | `UserNotifications`. A click opens the briefing via `NSWorkspace`. Several changes are grouped into one notification |
+| **Notifier** | Notifications | `UserNotifications`, one thread per day. The page's file URL travels in the notification; a click opens it via `NSWorkspace`. If the agent isn't running when a notification is clicked, macOS launches the app with no arguments, and it opens today's page instead of printing usage. Several changes are grouped into one notification |
 | **RunStateStore** | Records what happened | `state.json`: last run per kind, outcome (`full` / `partial` (some sources failed) / `skipped:<reason>` / `failed`), failed sources. Read by `briefing status` |
 | **Log** | Diagnostics | `os.Logger` (subsystem `com.thakur90.briefing`) plus a rotating file at `~/Library/Logs/Briefing/briefing.log` (1 MB × 3) |
 

@@ -10,6 +10,13 @@ public struct HourlyWeather: Codable, Sendable, Equatable {
     public var temperature: Double
     public var precipitationProbability: Int
     public var description: String
+
+    public init(time: Date, temperature: Double, precipitationProbability: Int, description: String) {
+        self.time = time
+        self.temperature = temperature
+        self.precipitationProbability = precipitationProbability
+        self.description = description
+    }
 }
 
 public struct WeatherForecast: Codable, Sendable, Equatable {
@@ -23,4 +30,19 @@ public struct WeatherForecast: Codable, Sendable, Equatable {
     public var sunset: Date?
     /// Today's remaining hours.
     public var hourly: [HourlyWeather]
+
+    public init(
+        unit: TemperatureUnit, currentTemperature: Double, currentDescription: String, high: Double, low: Double,
+        maxPrecipitationProbability: Int, sunrise: Date?, sunset: Date?, hourly: [HourlyWeather]
+    ) {
+        self.unit = unit
+        self.currentTemperature = currentTemperature
+        self.currentDescription = currentDescription
+        self.high = high
+        self.low = low
+        self.maxPrecipitationProbability = maxPrecipitationProbability
+        self.sunrise = sunrise
+        self.sunset = sunset
+        self.hourly = hourly
+    }
 }
