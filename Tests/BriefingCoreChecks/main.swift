@@ -92,7 +92,7 @@ await Harness.test("a partial config keeps defaults for missing keys") {
     expectEqual(config.day.end, "17:00")
     expectEqual(config.day.start, "08:00")
     expectEqual(config.temperatureUnit, .celsius)
-    expectEqual(config.model.name, "claude-opus-5-5")
+    expectEqual(config.summary.rainThreshold, 50)
 }
 
 await Harness.test("loadOrCreate writes a default config file") {

@@ -1,6 +1,6 @@
 # Morning Briefing — Design Doc
 
-**Status:** Draft v7 · **Author:** thakur90 · **Date:** 2026-11-04
+**Status:** Draft v8 · **Author:** thakur90 · **Date:** 2026-11-05
 
 ## 1. Goal
 
@@ -25,6 +25,7 @@ The briefing covers:
 - News headlines
 - Creating, editing or deleting events. The tool **only reads** calendars
 - iPhone app
+- **AI / LLM integration.** No Claude or other AI service. The summary is built by rules in the app (§6), so it works without any account, API key or cost
 
 ## 2. Platform & tooling
 
@@ -67,7 +68,7 @@ The briefing covers:
  │                                               ▼              │
  │                                      BriefingPipeline        │
  │   CalendarProvider(s) ─┐                      │              │
- │   RemindersService ────┼─► DayContext ─► Summarizer ─► Claude│
+ │   RemindersService ────┼─► DayContext ─► SummaryBuilder      │
  │   LocationService ─────┤                      │              │
  │   WeatherService ──────┘                      ▼              │
  │                                  OutputWriter · Notifier     │
@@ -77,7 +78,7 @@ The briefing covers:
 
 All the logic lives in `BriefingCore`. The executable is a thin shell: it either starts the agent or runs a CLI command.
 
-**Key decision: fetch first, then make one model call.** Plain code collects the data the same way every time, and a single Claude call writes a prioritized summary that points out conflicts, back-to-back meetings and free blocks. Claude has no tools and can't change anything.
+**Key decision: no AI, just rules.** Plain code collects the data, and `SummaryBuilder` turns it into the headline, the "Your day" paragraph and the per-event notes using fixed rules (§6). The same input always gives the same briefing; it works offline (except weather), costs nothing, and calendar data never leaves the Mac.
 
 ### 3.2 How CLI commands reach the agent
 
@@ -124,9 +125,8 @@ When an event is added, moved or cancelled, today's briefing updates on its own.
 1. **Listen:** EventKit posts `EKEventStoreChanged` whenever anything in any calendar or reminder list changes, including changes that arrive by sync.
 2. **Debounce (10 s):** a sync usually fires several notifications in a row. The watcher waits until things settle.
 3. **Re-fetch and diff:** read the rest of today's events and compare them with the last snapshot. Events are matched by their EventKit identifier and compared on start/end time, title, location and calendar. The result is `added` / `moved` / `cancelled` / `renamed`. Changes outside today, or edits only to notes, are ignored.
-4. **Refresh in two steps:**
-   - **Schedule section: updated instantly** from EventKit data. Plain code, no Claude call, no cost.
-   - **AI summary: regenerated** after a meaningful change, **at most once every 15 min** and **at most 6 times a day** (both configurable).
+4. **Refresh:**
+   - **The whole briefing is rebuilt**: schedule, headline, notes, free time. It's just local rules, so it's instant and there's no need to rate-limit it.
 5. **Save and notify:** rewrite today's briefing atomically with an "Updated 2:14 PM" stamp and a **"Changes since this morning"** section. Then send a notification: *"New: Dentist at 3:00 PM (Home)"*, *"Moved: 1:1 with Priya → 4:30 PM"*, *"Cancelled: Team lunch"*. Several changes together are grouped into one notification.
 
 **Rules:**
@@ -146,17 +146,47 @@ Each service returns data or an error. **If one source fails, the briefing still
 
 **Free blocks** are gaps of at least `day.minFreeMinutes` (30) between timed events, inside the `day.start`–`day.end` window (08:00–18:00), starting no earlier than *now*. All-day events don't block time. **Overlaps** are timed events that overlap by at least a minute.
 
-## 6. Summarizer (Claude API)
+## 6. Summary rules (`SummaryBuilder`)
 
-- **No official Anthropic Swift SDK exists**, so `ClaudeClient` is a small `URLSession` + `Codable` wrapper around `POST /v1/messages`. Request and response types are written from the API reference.
-- **Model:** `claude-opus-5-5`, adaptive thinking, `output_config.effort = "medium"`.
-- **Refusal fallback:** `fallbacks: "default"` with the `anthropic-beta: server-side-fallback-2026-07-01` header. Always check `stop_reason`.
-- **Structured output** via `output_config.format` (JSON schema), decoded into a `Briefing` struct:
-  `headline` · `schedule` (events + notes) · `reminders` (ranked) · `weatherNote` · `notificationText` (no more than about 200 characters)
-- **Prompt caching:** not used. Runs are at least 15 min apart, so the cache would have expired.
-- **API key:** stored in the macOS **Keychain**; only the agent reads it.
+The summary is built from the DayContext by fixed rules, with no AI. Thresholds are configurable (`summary` in §10). Every rule is a small pure function, so each one is unit-tested.
 
-**Estimated cost:** ~$0.07 per summary. Morning run + a typical 1–2 refreshes/day ≈ **$3–5/month**; the 6-per-day cap limits the worst case to ~$0.50/day.
+### 6.1 Headline (first matching rule wins)
+
+| # | When | Headline |
+|---|---|---|
+| 1 | No timed events | "Clear day: no meetings" |
+| 2 | Any overlap | "4 meetings today, 1 conflict at 3:30 PM" |
+| 3 | ≥ 3 meetings before noon | "Busy morning: 3 meetings before noon" |
+| 4 | ≥ 5 meetings | "Packed day: 6 meetings, 9:30 AM–5:00 PM" |
+| 5 | Otherwise | "2 meetings today, first at 9:30 AM" |
+
+Then, if it applies, a short **weather suffix**: " · rain from 4 PM" (rain chance ≥ `rainThreshold`), " · freezing tonight", or " · hot afternoon".
+
+### 6.2 "Your day" paragraph
+
+Sentences in this order, each only if it applies:
+
+1. **Shape:** "You have 4 meetings between 9:30 AM and 5:00 PM." / "No meetings today."
+2. **Back-to-back runs** (gaps < `backToBackGapMinutes`): "9:30–11:45 AM is back-to-back (3 meetings)."
+3. **Conflicts:** "Dentist overlaps Review from 3:30 to 4:00 PM."
+4. **Longest free block** (≥ `highlightFreeMinutes`): "Your longest free block is 12:00–3:00 PM (3 h)."
+5. **All-day events:** "All day: Team offsite."
+6. **Reminders:** "2 reminders are overdue (oldest from Sep 13); 1 is due today."
+7. **Weather advice:** "Rain likely from 4 PM (70%), so take an umbrella." / "Low of 30° tonight." / "High of 90°."
+
+### 6.3 Per-event notes (shown under the event on the page)
+
+- "Back-to-back with Standup" · "⚠ Overlaps Review (3:30–4:00 PM)" · "First meeting of the day"
+- "Added at 2:13 PM" / "Moved from 1:00 PM" (from live updates, §4.3)
+
+### 6.4 Notification text
+
+- **Title:** the headline.
+- **Body:** up to ~200 characters, built from the first event, the longest free block, the reminders count and the weather advice, e.g. *"First up: Standup 9:30. Free 12–3. 2 reminders due. Rain from 4 PM, take an umbrella."*
+
+### 6.5 Possible later: on-device AI (opt-in)
+
+If a more natural-sounding paragraph is ever wanted, Apple's **on-device** Foundation Models (macOS 26, Apple Intelligence) could rewrite the rule-based paragraph locally: no network, no account, no cost. It would stay **off by default**, and the rules above remain the source of truth (§16).
 
 ## 7. Notifications & output
 
@@ -174,9 +204,9 @@ Clicking any notification opens `~/Briefings/YYYY-MM-DD.html` in the default bro
 
 | # | Section | Content |
 |---|---|---|
-| 1 | Header | Date, Claude's headline, "Generated 7:00 AM · Updated 2:14 PM" |
+| 1 | Header | Date, headline (§6.1), "Generated 7:00 AM · Updated 2:14 PM" |
 | 2 | Changes since this morning | Only shown after a change: **New** / **Moved** / **Cancelled** tags. Change notifications link here (`#changes`) |
-| 3 | Your day | Claude's short paragraph: priorities, prep, free time, weather advice |
+| 3 | Your day | The rule-based paragraph (§6.2): shape of the day, back-to-back runs, conflicts, free time, reminders, weather advice |
 | 4 | Weather | Location, current temp, high/low, one-line note, hourly strip (temp + rain chance) |
 | 5 | Schedule | Each event: time, calendar colour, calendar · account, location. Notes: back-to-back, conflicts, moved/added. Free blocks highlighted; cancelled events struck through |
 | 6 | Reminders | Due today; overdue highlighted |
@@ -203,9 +233,12 @@ All permissions are granted to **`Briefing.app`** (bundle ID `com.thakur90.brief
 
 ## 9. Security & privacy
 
-- Sent to Claude: event titles, times and locations; reminder titles; and weather. Calendars or lists marked private in config are never sent.
-- Event titles from invites are written by other people. The summarizer has no tools, and the prompt treats that data as content, not instructions. The tool never writes to calendars.
-- The API key is kept only in the Keychain. Config holds no secrets.
+- **Calendar and reminder data never leaves the Mac.** The only network requests are:
+  - **Open-Meteo:** coordinates rounded to ~1 km, for the forecast
+  - **ipapi.co:** only if current location fails (it sees the Mac's IP address)
+  - **Open-Meteo geocoding:** only if the config city fallback is used
+- No accounts, API keys or secrets anywhere. The tool never writes to calendars.
+- Event titles from invites are written by other people. They're HTML-escaped on the briefing page and never executed or interpreted.
 - The CLI → agent channel (§3.2) only accepts a fixed set of commands. Responses are written to my own Application Support folder.
 
 ## 10. Configuration
@@ -225,13 +258,12 @@ All permissions are granted to **`Briefing.app`** (bundle ID `com.thakur90.brief
     "exclude": ["Holidays in United States", "Birthdays", "Siri Suggestions"]
   },
   "reminders": { "lists": [] },
-  "liveUpdates": {
-    "enabled": true,
-    "notifyOnChanges": true,
-    "minMinutesBetweenSummaries": 15,
-    "maxSummariesPerDay": 6
-  },
-  "model": { "name": "claude-opus-5-5", "effort": "medium" }
+  "liveUpdates": { "enabled": true, "notifyOnChanges": true },
+  "summary": {
+    "rainThreshold": 50,
+    "backToBackGapMinutes": 5,
+    "highlightFreeMinutes": 60
+  }
 }
 ```
 
@@ -245,11 +277,11 @@ pet-projects/
 │   │   ├── Agent/                 # Agent, MorningScheduler, CommandListener
 │   │   ├── Calendars/             # CalendarProvider, EventKitProvider, CalendarWatcher, diff, dedupe
 │   │   ├── Services/              # Reminders, Location, Weather
-│   │   ├── Claude/                # ClaudeClient, Summarizer
+│   │   ├── Summary/               # SummaryBuilder and its rules
 │   │   ├── Models/                # Event, EventChange, Reminder, DayContext, Briefing
 │   │   ├── Output/                # HTMLRenderer, MarkdownRenderer, OutputWriter, Notifier
 │   │   ├── Scheduling/            # ScheduleGuard, RunLock, RunStateStore, LaunchAgentInstaller
-│   │   └── Config/                # config.json + Keychain
+│   │   └── Config/                # config.json, paths
 │   └── briefing/                  # entry point: `agent` mode + CLI commands
 ├── Support/Info.plist             # bundle Info.plist (LSUIElement, usage descriptions)
 ├── scripts/build-app.sh           # swift build → Briefing.app → sign → ~/Applications
@@ -265,8 +297,7 @@ pet-projects/
 |---|---|
 | A data source fails | Briefing still appears; the missing section is noted |
 | Permission denied | The notification says which permission is missing and opens System Settings → Privacy & Security when clicked |
-| Claude API error or refusal | Retry, then server-side fallback, then a **plain summary** (schedule, reminders and weather without the AI write-up) |
-| Burst of calendar changes | Debounced (10 s); AI refresh limited to once every 15 min and 6 times a day; the schedule section is always current |
+| Burst of calendar changes | Debounced (10 s), then one rebuild |
 | Agent crashes | launchd restarts it (`KeepAlive`, 30 s throttle); on start it runs the catch-up check |
 | Agent not running when the CLI is used | The CLI says so and suggests `briefing install` or `briefing status` |
 
@@ -274,21 +305,21 @@ pet-projects/
 
 - **Test runner:** Swift Testing and XCTest both need Xcode's test runner (with the Command Line Tools, `Testing` compiles but finds no tests, and `XCTest` is missing). So tests are a small executable target with `expect` / `expectEqual` helpers: **`swift run briefing-tests`** (exits non-zero on failure).
 - **Sample data only** in tests and fixtures. The repo is public, so nothing from real calendars, reminders or locations is committed.
-- Unit tests for dedupe, free blocks, overlaps, reminder due/overdue rules, config defaults, weather parsing, the location fallback order, the collector, the CLI ↔ agent request IDs, the launchd plist, and the dry-run text. Milestone 3 adds the HTML/Markdown output and Claude JSON decoding.
-- **Watcher:** diff cases (added / moved / cancelled / renamed / notes-only ignored / other day ignored), debounce, and the AI refresh limits.
+- Unit tests for dedupe, free blocks, overlaps, reminder due/overdue rules, config defaults, weather parsing, the location fallback order, the collector, the CLI ↔ agent request IDs, the launchd plist, and the dry-run text. Milestone 3 adds one test per summary rule (§6) and the HTML/Markdown output.
+- **Watcher:** diff cases (added / moved / cancelled / renamed / notes-only ignored / other day ignored), and debounce.
 - **Scheduler:** next-run calculation, weekend skip, catch-up after sleep or login, time-zone change.
 - Protocol-based fakes for EventKit, location, network and the clock, so tests never touch real calendars or wait in real time.
-- `briefing today --dry-run`: the agent builds the DayContext and the CLI prints it (no Claude call, no files written).
+- `briefing today --dry-run`: the agent builds the DayContext and the CLI prints it (no files written).
 - Manual: add, move and delete an event in Calendar (Mac and iPhone) → check that the briefing and notification update.
 
 ## 14. Milestones
 
 1. **Permissions test:** ✅ the CLI binary gets Calendars and Reminders, ❌ but not Location. ✅ `Briefing.app` (built by `scripts/build-app.sh`, ad-hoc signed) started by launchd gets **all four**: Calendars, Reminders, Location, Notifications (2026-10-27). ✅ Signed with the self-signed "Briefing Code Signing" certificate, permissions **survive a rebuild** (new CDHash, no new prompts). **Done.**
 2. **Read path:** ✅ EventKitProvider, Reminders, Location (+ fallbacks), Weather, DayContext, CLI → agent requests, `briefing today --dry-run [--json]`. `briefing install / uninstall / status` were **moved here from milestone 4**, because the dry run needs a running agent. 22 tests. **Done** (2026-11-04).
-3. **Summarizer & output:** ClaudeClient, structured output, plain-summary fallback, HTML page (matching the mockup) + Markdown, notification that opens the page.
+3. **Summary & output:** SummaryBuilder rules (§6), HTML page (matching the mockup) + Markdown, notification that opens the page, `briefing today`.
 4. **Morning schedule:** MorningScheduler (7:00 weekdays, catch-up); `status` shows the next run.
-5. **Live updates:** CalendarWatcher (listen → debounce → diff), instant schedule refresh, limited AI refresh, change notifications.
-6. **Polish:** tune the prompt using real briefings.
+5. **Live updates:** CalendarWatcher (listen → debounce → diff), full rebuild on change, change notifications.
+6. **Polish:** tune the summary rules and thresholds using a few weeks of real briefings.
 
 ## 15. Decisions log
 
@@ -299,12 +330,14 @@ pet-projects/
 | 2026-10-23 | No visible UI: background agent + notifications (no menu bar, no window) |
 | 2026-10-23 | Built without Xcode (it can't be installed on this macOS version) |
 | 2026-10-27 | Notification click opens an HTML briefing page; layout approved (`docs/mockups/briefing.html`) |
+| 2026-11-05 | **No Claude / AI integration.** The summary is rule-based (§6); the app needs no API key and sends no calendar data anywhere |
 
 ## 16. Future ideas
 
 - Travel time to events with a location ("leave by 2:40"), e.g. via MapKit
 - Direct Google / Microsoft Graph providers (§4.2)
 - Evening wrap-up and tomorrow preview
+- Opt-in on-device AI wording via Apple Foundation Models (§6.5)
 
 ---
 
@@ -351,11 +384,11 @@ Every component sits behind a protocol, so tests can swap in fakes (clock, files
 | **RunCoordinator** | Runs one briefing generation | Steps in A.4. Each trigger says what kind of run it wants: `morning`, `refresh(changes)`, or `manual` |
 | **ScheduleGuard** | Decides whether a morning run should happen | Rules in A.3. Uses an injected `Clock` and `Calendar` |
 | **RunLock** | One generation at a time | An in-process actor, plus `flock` on `run.lock` in case a second agent instance ever starts |
-| **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`, up to 120 s. If it times out: plain summary, weather skipped |
-| **BriefingPipeline** | The actual work (§4–§6) | Collect → DayContext → Summarizer → `Briefing` |
+| **NetworkWaiter** | Waits for the network after wake | `NWPathMonitor`, up to 120 s. If it times out, the briefing is built without weather |
+| **BriefingPipeline** | The actual work (§4–§6) | Collect → DayContext → SummaryBuilder → `Briefing` |
 | **OutputWriter** | Saves the results | `.md`, `.html` and `.context.json`, written **atomically** (temp file + rename) |
 | **Notifier** | Notifications | `UserNotifications`. A click opens the briefing via `NSWorkspace`. Several changes are grouped into one notification |
-| **RunStateStore** | Records what happened | `state.json`: last run per kind, outcome (`full` / `plain` / `skipped:<reason>` / `failed`), failed sources, AI refreshes used today. Read by `briefing status` |
+| **RunStateStore** | Records what happened | `state.json`: last run per kind, outcome (`full` / `partial` (some sources failed) / `skipped:<reason>` / `failed`), failed sources. Read by `briefing status` |
 | **Log** | Diagnostics | `os.Logger` (subsystem `com.thakur90.briefing`) plus a rotating file at `~/Library/Logs/Briefing/briefing.log` (1 MB × 3) |
 
 ### A.2 Agent plist
@@ -417,14 +450,13 @@ trigger (morning | refresh(changes) | manual)
   3. NetworkWaiter.wait(≤120s)        → offline? continue (plain mode)
   4. BriefingPipeline.run(today)
        collectors in parallel (EventKit, Reminders, Location→Weather)
-       refresh: schedule always updated; AI only if allowed by the limits (§4.3)
-       Summarizer → Claude (retry ×2 → server fallback → plain summary)
+       SummaryBuilder → Briefing (headline, paragraph, notes; §6)
   5. OutputWriter.write(md, html, context.json)   (atomic)
   6. Notifier.post(morning summary | change summary)
   7. RunStateStore.record(outcome)    → release lock
 ```
 
-Typical run: 5–20 s (mostly the Claude call). Overall timeout: 3 min, after which the plain summary is written.
+Typical run: ~1–3 s (mostly the location fix and the weather request). Overall timeout: 2 min, after which the briefing is written with whatever was collected.
 
 ### A.5 CLI commands
 
@@ -432,7 +464,7 @@ Typical run: 5–20 s (mostly the Claude call). Overall timeout: 3 min, after wh
 |---|---|---|
 | `briefing install` | No | Installs the app and agent, then starts it. The agent asks for all permissions on its first launch |
 | `briefing uninstall` | No | Stops and removes the agent and app (keeps briefings, logs, config) |
-| `briefing status` | No | Agent loaded and running? Next morning run, last runs and outcomes, AI refreshes used today, permission status (from `state.json`), and calendars found |
+| `briefing status` | No | Agent loaded and running? Next morning run, last runs and outcomes, permission status (from `state.json`), and calendars found |
 | `briefing open` | No | Opens today's briefing |
 | `briefing today [--dry-run] [--json]` | Yes | Generates the briefing now (`--dry-run`: prints the DayContext only; `--json`: raw JSON) |
 | `briefing check [--local]` | Yes | Permission check (milestone 1). `--local` runs it in the terminal process instead (location won't work there) |
@@ -452,7 +484,6 @@ macOS remembers permissions **per code signature** (its "designated requirement"
 | Concern | Handling |
 |---|---|
 | launchd environment (no `PATH`, no shell profile) | Absolute paths everywhere; no reliance on environment variables |
-| API key | Read from the **login Keychain**; works because the agent runs inside my user session (`gui/<uid>`) |
 | Idle cost | The agent is idle between triggers: no polling, ~0% CPU, a few MB of memory |
 | Disk | Briefings are ~5–20 KB each; no automatic cleanup |
 

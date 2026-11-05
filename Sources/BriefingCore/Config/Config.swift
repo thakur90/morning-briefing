@@ -41,15 +41,18 @@ public struct Config: Codable, Sendable, Equatable {
 
         public var enabled = true
         public var notifyOnChanges = true
-        public var minMinutesBetweenSummaries = 15
-        public var maxSummariesPerDay = 6
     }
 
-    public struct Model: Codable, Sendable, Equatable {
+    /// Thresholds for the rule-based summary (design doc §6).
+    public struct Summary: Codable, Sendable, Equatable {
         public init() {}
 
-        public var name = "claude-opus-5-5"
-        public var effort = "medium"
+        /// Rain chance (%) at which the summary mentions rain.
+        public var rainThreshold = 50
+        /// Gaps shorter than this count as back-to-back.
+        public var backToBackGapMinutes = 5
+        /// Free blocks at least this long are called out.
+        public var highlightFreeMinutes = 60
     }
 
     public var runAt = "07:00"
@@ -62,7 +65,7 @@ public struct Config: Codable, Sendable, Equatable {
     public var calendars = Calendars()
     public var reminders = Reminders()
     public var liveUpdates = LiveUpdates()
-    public var model = Model()
+    public var summary = Summary()
 
     public init() {}
 
