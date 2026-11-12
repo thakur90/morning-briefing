@@ -196,6 +196,7 @@ If a more natural-sounding paragraph is ever wanted, Apple's **on-device** Found
 | Morning notification | Title: the headline ("Busy morning, 3 meetings before noon"). Body: `notificationText`. **Clicking it opens today's briefing** |
 | Change notification | "New / Moved / Cancelled: …". Clicking it opens the briefing at "Changes since this morning" |
 | Framework | `UserNotifications`, posted by the agent (permission is asked once) |
+| Stays until clicked | Alert style **Persistent** (System Settings → Notifications → Briefing). The app can't force it, but `NSUserNotificationAlertStyle = alert` in Info.plist makes it the default for new installs |
 | Files | `~/Briefings/YYYY-MM-DD.html` (opened on click), `.md` (plain-text copy), `.context.json` (raw data, for debugging) |
 | Quiet when needed | Respects Focus / Do Not Disturb (standard macOS behaviour). `liveUpdates.notifyOnChanges` turns change alerts off |
 

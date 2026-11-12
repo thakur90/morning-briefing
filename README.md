@@ -175,5 +175,6 @@ docs/                   design.md, mockups/briefing.html
 | Permissions asked again after every rebuild | The app is ad-hoc signed. Create the certificate (Install, step 1) |
 | `Bootstrap failed: 5: Input/output error` | The old agent hadn't stopped yet. Run `scripts/build-app.sh --install` again |
 | No Google events | Add the account in System Settings → Internet Accounts with **Calendars** on |
+| Notifications disappear after a few seconds | System Settings → Notifications → **Briefing** → alert style **Persistent**. It then stays until you click it (new installs default to this) |
 | `briefing today --dry-run` shows the location as "approximate, from IP" | Location access is off: System Settings → Privacy & Security → Location Services → Briefing |
 | `The background agent isn't running` | Check `~/Library/Logs/Briefing/launchd.log`, then `scripts/build-app.sh --install` |
